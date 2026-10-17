@@ -1,0 +1,8 @@
+# cartelle di build
+/build/
+build*/
+
+# artefatti di compilazione
+*.o
+*.obj
+*.exe

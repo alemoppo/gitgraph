@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# make_test_repo.sh [percorso]
+#
+# Crea un repository Git isolato e ripetibile per i test di gitgraph.
+# Non tocca altri repository. Default: ${TMPDIR:-/tmp}/gitgraph_test_repo
+#
+# Stesso contenuto della versione .bat: main(A,B,C), branch1 da B, branch2
+# da B2, merge --no-ff, fast-forward, branch cancellato dopo il merge, caso
+# ambiguo, branch con slash, piu' riferimenti sullo stesso commit, messaggio
+# con accenti e piu' righe, uno stash.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+REPO="${1:-${GG_TEST_REPO:-${TMPDIR:-/tmp}/gitgraph_test_repo}}"
+rm -rf "$REPO"
+mkdir -p "$REPO"
+
+export GIT_AUTHOR_NAME="Test User"
+export GIT_AUTHOR_EMAIL="test@example.com"
+export GIT_COMMITTER_NAME="Test User"
+export GIT_COMMITTER_EMAIL="test@example.com"
+
+git -C "$REPO" init -q -b main
+git -C "$REPO" config commit.gpgsign false
+git -C "$REPO" config core.autocrlf false
+
+commit() {  # commit <data-iso> <messaggio...>
+    GIT_AUTHOR_DATE="$1" GIT_COMMITTER_DATE="$1" \
+        git -C "$REPO" commit -q --allow-empty -m "$2"
+}
+
+# --- main: A, B, C ----------------------------------------------------------
+echo hello > "$REPO/hello.txt"
+git -C "$REPO" add hello.txt
+GIT_AUTHOR_DATE="2026-01-02T10:00:00+0000" GIT_COMMITTER_DATE="2026-01-02T10:00:00+0000" \
+    git -C "$REPO" commit -q -m "A: prima revisione"
+commit "2026-01-02T10:02:00+0000" "B: seconda revisione"
+
+# C: messaggio con accenti e piu' righe (UTF-8)
+printf '%s\n' "terza revisione: àccenti e più righe" "" "corpo del messaggio, con ünïcode: ✓" \
+    > "$REPO/msg-c.txt"
+GIT_AUTHOR_DATE="2026-01-02T10:04:00+0000" GIT_COMMITTER_DATE="2026-01-02T10:04:00+0000" \
+    git -C "$REPO" commit -q --allow-empty -F "$REPO/msg-c.txt"
+rm "$REPO/msg-c.txt"
+
+# piu' riferimenti sullo stesso commit (C)
+git -C "$REPO" tag v1.0-lw
+GIT_COMMITTER_DATE="2026-01-02T11:40:00+0000" git -C "$REPO" tag -a v1.0 -m "versione 1.0"
+
+# --- feature/x da C ---------------------------------------------------------
+git -C "$REPO" checkout -q -b feature/x main
+commit "2026-01-02T10:06:00+0000" "FX1: lavoro su feature/x"
+commit "2026-01-02T10:08:00+0000" "FX2: altro lavoro su feature/x"
+
+# --- branch1 da B -----------------------------------------------------------
+git -C "$REPO" checkout -q -b branch1 main~1
+commit "2026-01-02T10:10:00+0000" "B1: inizio su branch1"
+commit "2026-01-02T10:12:00+0000" "B2: branch2 nascera' da qui"
+commit "2026-01-02T10:14:00+0000" "B3: fine di branch1"
+git -C "$REPO" tag b1-final branch1
+
+# --- branch2 da B2 ----------------------------------------------------------
+git -C "$REPO" checkout -q -b branch2 branch1~1
+commit "2026-01-02T10:20:00+0000" "C1: inizio su branch2"
+commit "2026-01-02T10:22:00+0000" "C2: fine di branch2"
+
+# --- caso ambiguo: ambbase (X), amb1 e amb2 su X, ambchild da X -------------
+# X poggia sulla radice A, per non interferire con branch1/branch2
+git -C "$REPO" checkout -q -b ambbase main~2
+commit "2026-01-02T10:30:00+0000" "X: punto di diramazione ambiguo"
+git -C "$REPO" checkout -q -b amb1 ambbase
+git -C "$REPO" checkout -q -b amb2 ambbase
+git -C "$REPO" checkout -q -b ambchild ambbase
+commit "2026-01-02T10:32:00+0000" "AC1: da X, padre non univoco"
+commit "2026-01-02T10:34:00+0000" "AC2: fine di ambchild"
+
+# --- merge --no-ff di branch1 in main ---------------------------------------
+git -C "$REPO" checkout -q main
+GIT_AUTHOR_DATE="2026-01-02T10:40:00+0000" GIT_COMMITTER_DATE="2026-01-02T10:40:00+0000" \
+    git -C "$REPO" merge -q --no-ff branch1 -m "Merge branch 'branch1' (--no-ff)"
+
+# --- branch temp: merge --no-ff poi cancellazione ---------------------------
+git -C "$REPO" checkout -q -b temp main
+commit "2026-01-02T10:50:00+0000" "T1: lavoro del branch temp"
+git -C "$REPO" checkout -q main
+GIT_AUTHOR_DATE="2026-01-02T11:00:00+0000" GIT_COMMITTER_DATE="2026-01-02T11:00:00+0000" \
+    git -C "$REPO" merge -q --no-ff temp -m "Merge branch 'temp' (--no-ff)"
+git -C "$REPO" branch -D temp >/dev/null
+
+# --- fast-forward: ff con F1, main si allinea, poi D ------------------------
+git -C "$REPO" checkout -q -b ff main
+commit "2026-01-02T11:10:00+0000" "F1: commit di ff"
+git -C "$REPO" checkout -q main
+git -C "$REPO" merge -q --ff-only ff
+commit "2026-01-02T11:20:00+0000" "D: tip di main"
+
+# piu' riferimenti sullo stesso commit (D)
+git -C "$REPO" tag tip-lw
+GIT_COMMITTER_DATE="2026-01-02T11:50:00+0000" git -C "$REPO" tag -a v2.0 -m "versione 2.0"
+
+# --- stash: non deve comparire nel grafo ------------------------------------
+echo "lavoro in corso" > "$REPO/wip.txt"
+git -C "$REPO" add wip.txt
+git -C "$REPO" stash push -q -m "lavoro in corso"
+
+# --- remote-tracking speculare (stessa punta di main: specchio) -------------
+git -C "$REPO" update-ref refs/remotes/origin/main main
+
+echo "OK: $REPO"
