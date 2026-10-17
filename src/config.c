@@ -2,20 +2,29 @@
  *
  * Parser di graph.cfg: sezioni [long-lived] e [parents], commenti su righe
  * dedicate, valori `chiave = valore`, wildcard '*' in [long-lived] (espansi
- * sui branch esistenti conservando l'ordine della lista) e validazione con
- * diagnostica (errori e avvisi). Nessuna dipendenza esterna, nessuna scrittura:
- * il file viene solo letto.
+ * sui branch esistenti in ordine naturale, vale la prima riga che
+ * corrisponde) e validazione con diagnostica (errori e avvisi). Nessuna
+ * dipendenza esterna, nessuna scrittura: il file viene solo letto.
+ *
+ * I commenti stanno solo su righe dedicate: un '#' o un ';' dentro una riga
+ * di dati fa parte del valore (i nomi di riferimento Git possono contenerli),
+ * e una riga che diventa cosi' non valida viene segnalata come tale invece di
+ * essere troncata.
  *
  * Contratto: un errore rifiuta il file per intero; gli avvisi restano
- * applicati e vengono elencati. Il nome del file e' sempre incluso nei
- * messaggi, con il numero di riga, cosi' l'utente sa dove intervenire.
+ * applicati e vengono elencati. Anche un file presente ma illeggibile e'
+ * rifiutato (con diagnostica), mentre un file assente non e' un errore.
+ * Il nome del file e' sempre incluso nei messaggi, con il numero di riga,
+ * cosi' l'utente sa dove intervenire.
  */
 #include "config.h"
 
 #include "util.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -211,18 +220,25 @@ static int cmp_natural_str(const void *a, const void *b)
 
 /* Sintassi di un nome di riferimento Git (sottinsieme delle regole che
  * contano qui: niente spazi, caratteri vietati, "..", "@{", "/"/"." ai
- * bordi, suffisso ".lock"). */
-static bool refname_syntax_ok(const char *name)
+ * bordi, suffisso ".lock").
+ *
+ * Il confronto del suffisso ".lock" avviene solo quando il nome e' abbastanza
+ * lungo da contenerlo (almeno un carattere prima): calcolare prima l'offset
+ * porterebbe a un underflow di size_t sui nomi brevi e a una lettura fuori
+ * dal buffer. */
+bool config_refname_syntax_ok(const char *name)
 {
     if (!name || !*name)
         return false;
     if (strcmp(name, "@") == 0)
         return false;
     size_t n = strlen(name);
+    /* n >= 1 garantito dal controllo precedente: name[n - 1] e' in bounds */
     if (name[0] == '/' || name[0] == '.' || name[n - 1] == '/' || name[n - 1] == '.')
         return false;
-    size_t lock_at = n - 5;
-    if (lock_at > 0 && strcmp(name + lock_at, ".lock") == 0)
+    /* suffisso ".lock": confrontabile solo con almeno 5 caratteri piu' il
+     * nome ("x.lock"), cioe' n >= 6 */
+    if (n >= 6 && strcmp(name + (n - 5), ".lock") == 0)
         return false;
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)name[i];
@@ -326,7 +342,7 @@ static void add_long_lived(Parser *p, size_t line, const char *pattern)
         if (has_wildcard(pattern))
             diag(p, CONFIG_DIAG_WARNING, line,
                  "il pattern '%s' non corrisponde a nessun branch", pattern);
-        else if (!refname_syntax_ok(pattern))
+        else if (!config_refname_syntax_ok(pattern))
             diag(p, CONFIG_DIAG_WARNING, line,
                  "'%s' non e' un nome di riferimento valido", pattern);
         else
@@ -353,12 +369,12 @@ static bool branch_present(const Parser *p, const char *name)
 
 static void add_override(Parser *p, size_t line, const char *branch, const char *parent)
 {
-    if (!refname_syntax_ok(branch)) {
+    if (!config_refname_syntax_ok(branch)) {
         diag(p, CONFIG_DIAG_ERROR, line,
              "'%s' non e' un nome di riferimento valido", branch);
         return;
     }
-    if (!refname_syntax_ok(parent)) {
+    if (!config_refname_syntax_ok(parent)) {
         diag(p, CONFIG_DIAG_ERROR, line,
              "'%s' non e' un nome di riferimento valido", parent);
         return;
@@ -392,34 +408,74 @@ static void add_override(Parser *p, size_t line, const char *branch, const char 
 }
 
 /* Cerca cicli fra gli override dichiarati: in fase di modello un ciclo
- * renderebbe ambigui i nodi coinvolti, quindi e' un avviso, non un errore. */
+ * renderebbe ambigui i nodi coinvolti, quindi e' un avviso, non un errore.
+ *
+ * Ogni branch ha al massimo un override dichiarato (add_override rifiuta i
+ * duplicati), quindi il grafo e' funzionale: ogni ramo arriva a una sola
+ * sorgente e contiene al massimo un ciclo. Una mappa nome -> indice rende la
+ * ricerca dell'override O(1) e una visita con tre stati (non visitato, in
+ * visita, completato) fa girare l'analisi una volta sola per ramo, con costo
+ * lineare anche su configurazioni grandi (prima erano O(n^3)). Ogni ciclo
+ * viene segnalato una volta sola. */
 static void warn_cycles(Parser *p)
 {
     size_t n = p->cfg->override_count;
-    for (size_t i = 0; i < n; i++) {
-        const char *cur = p->cfg->overrides[i].parent;
-        for (size_t step = 0; step < n; step++) {
-            if (!cur)
+    if (n == 0)
+        return;
+
+    /* indice del padre di ogni override, ricavato senza confronti ripetuti */
+    StrMap *by_branch = strmap_new();
+    for (size_t i = 0; i < n; i++)
+        strmap_put(by_branch, p->cfg->overrides[i].branch, (void *)(uintptr_t)(i + 1));
+
+    enum { ST_NOT_VISITED = 0, ST_IN_PROGRESS = 1, ST_DONE = 2 };
+    uint8_t *state = xcalloc(n, 1);
+    size_t *path = xmalloc(n * sizeof(size_t)); /* ramo in corso: 0..len-1 */
+    size_t *depth = xmalloc(n * sizeof(size_t)); /* posizione nel ramo corrente */
+
+    for (size_t start = 0; start < n; start++) {
+        if (state[start] != ST_NOT_VISITED)
+            continue;
+        size_t len = 0;
+        size_t cur = start;
+        /* scende lungo gli override finche' qualcosa e' ancora da esplorare */
+        while (cur < n && state[cur] == ST_NOT_VISITED) {
+            state[cur] = ST_IN_PROGRESS;
+            depth[cur] = len;
+            path[len++] = cur;
+            void *next = strmap_get(by_branch, p->cfg->overrides[cur].parent);
+            if (!next) {
+                cur = n; /* il padre non ha override: il ramo finisce qui */
                 break;
-            const char *next = NULL;
-            for (size_t k = 0; k < n; k++) {
-                if (strcmp(p->cfg->overrides[k].branch, cur) == 0) {
-                    next = p->cfg->overrides[k].parent;
-                    break;
-                }
             }
-            if (!next)
-                break;
-            if (strcmp(next, p->cfg->overrides[i].branch) == 0) {
-                diag(p, CONFIG_DIAG_WARNING, 0,
-                     "'%s' e' in un ciclo di override con '%s': i branch coinvolti "
-                     "resteranno ambigui",
-                     p->cfg->overrides[i].branch, next);
-                break;
-            }
-            cur = next;
+            size_t ni = (size_t)(uintptr_t)next - 1;
+            cur = ni;
         }
+        if (cur < n && state[cur] == ST_IN_PROGRESS) {
+            /* ciclo: dal nodo gia' in corso fino alla fine del ramo */
+            size_t from = depth[cur];
+            StrBuf sb;
+            sb_init(&sb);
+            sb_append(&sb, "ciclo di override: ");
+            for (size_t k = from; k < len; k++) {
+                if (k > from)
+                    sb_append(&sb, " -> ");
+                sb_append(&sb, p->cfg->overrides[path[k]].branch);
+            }
+            sb_appendf(&sb, " -> %s: i branch coinvolti resteranno ambigui",
+                       p->cfg->overrides[cur].branch);
+            /* nessun numero di riga: il ciclo non appartiene a una riga sola */
+            diag(p, CONFIG_DIAG_WARNING, 0, "%s", sb.data);
+            sb_free(&sb);
+        }
+        for (size_t k = 0; k < len; k++)
+            state[path[k]] = ST_DONE;
     }
+
+    free(depth);
+    free(path);
+    free(state);
+    strmap_free(by_branch);
 }
 
 /* ---------- tokenizzazione ---------- */
@@ -566,9 +622,23 @@ bool config_load(GraphConfig *cfg, const char *path,
     /* Assenza del file: nessun errore, resta solo il tronco implicito. */
     if (!path)
         goto implicit_trunk;
+    errno = 0;
     FILE *f = fopen(path, "rb");
-    if (!f)
-        goto implicit_trunk; /* graph.cfg facoltativo: si prosegue coi default */
+    if (!f) {
+        int open_errno = errno;
+        if (open_errno == ENOENT)
+            goto implicit_trunk; /* graph.cfg facoltativo: si prosegue coi default */
+        /* esiste ma non si puo' aprire (permessi, directory, ...): non e' la
+         * stessa cosa di un file assente, quindi e' un errore esplicito */
+        ok = false;
+        diag(&p, CONFIG_DIAG_ERROR, 0, "impossibile aprire '%s': %s", path,
+             strerror(open_errno));
+        if (err)
+            snprintf(err, err_size, "apertura di '%s' fallita: %s", path,
+                     strerror(open_errno));
+        config_free(cfg);
+        goto implicit_trunk;
+    }
     {
         StrBuf text;
         sb_init(&text);
@@ -577,12 +647,16 @@ bool config_load(GraphConfig *cfg, const char *path,
         while ((got = fread(chunk, 1, sizeof chunk, f)) > 0)
             sb_appendn(&text, chunk, got);
         bool read_error = ferror(f) != 0;
+        if (read_error)
+            diag(&p, CONFIG_DIAG_ERROR, 0, "lettura di '%s' fallita", path);
         fclose(f);
         if (read_error) {
             sb_free(&text);
+            ok = false;
             if (err)
                 snprintf(err, err_size, "lettura di '%s' fallita", path);
-            return false;
+            config_free(cfg);
+            goto implicit_trunk;
         }
         sb_append(&text, "\n"); /* riga finale senza newline */
         ok = parse_text(&p, text.data);

@@ -4,11 +4,14 @@
  *
  * <directory-di-lavoro> serve solo per i file di prova che il test scrive.
  *
- * Copre: sezioni e commenti, wildcard in [long-lived] (espansione e ordine),
- * tronco implicito, override in [parents], errori che rifiutano il file,
- * avvisi che lo lasciano valido, cicli, assenza del file e uso end-to-end
- * con graph.cfg dentro il repository di prova (override -> stato
- * 'configurato', long-lived senza fork ne' candidati).
+ * Copre: sezioni e commenti (solo su righe dedicate), wildcard in [long-lived]
+ * (espansione, ordine naturale, priorita' della prima riga), tronco implicito,
+ * override in [parents], validazione dei nomi di riferimento (comprese le
+ * lunghezze attorno al suffisso ".lock"), errori che rifiutano il file, file
+ * assente/illeggibile/vuoto, avvisi che lo lasciano valido, cicli di override
+ * (nessuno, due nodi, catena lunga, cicli distinti) e uso end-to-end con
+ * graph.cfg dentro il repository di prova (override -> stato 'configurato',
+ * long-lived senza fork ne' candidati).
  *
  * Esce con 0 se tutti i test passano, 1 se qualcuno fallisce, 2 su errore di
  * preparazione.
@@ -71,6 +74,19 @@ static ConfigBranch g_fake[] = {
     { "origin/release/2.0", "release/2.0" },
     { "feature/x", "feature/x" },
     { "bugfix/1", "bugfix/1" },
+    /* nomi con caratteri che la grammatica deve non toccare */
+    { "feat#1", "feat#1" },
+    { "feat;x", "feat;x" },
+    /* nomi brechi, per la validazione dei riferimenti */
+    { "a", "a" },
+    { "abc", "abc" },
+    { "abcd", "abcd" },
+    { "abcde", "abcde" },
+    { "abcdef", "abcdef" },
+    { "catena/x", "catena/x" },
+    { "catena/y", "catena/y" },
+    { "catena/z", "catena/z" },
+    { "catena/w", "catena/w" },
 };
 #define FAKE_COUNT (sizeof(g_fake) / sizeof(g_fake[0]))
 
@@ -89,6 +105,26 @@ static bool load_text(const char *name, const char *text, GraphConfig *cfg,
     return config_load(cfg, path, g_fake, FAKE_COUNT, report, err, sizeof err);
 }
 
+/* Crea una directory vuota (per provare il caso "il percorso esiste ma non e'
+ * un file leggibile"). */
+static bool make_dir(const char *path)
+{
+#ifdef _WIN32
+    return _mkdir(path) == 0;
+#else
+    return mkdir(path, 0777) == 0;
+#endif
+}
+
+static void remove_dir(const char *path)
+{
+#ifdef _WIN32
+    RemoveDirectoryA(path);
+#else
+    rmdir(path);
+#endif
+}
+
 static bool report_has(const ConfigReport *r, const char *needle)
 {
     for (size_t i = 0; i < r->count; i++) {
@@ -96,6 +132,17 @@ static bool report_has(const ConfigReport *r, const char *needle)
             return true;
     }
     return false;
+}
+
+/* Quante volte compare `needle` nella diagnostica (serve a verificare che un
+ * ciclo venga segnalato una volta sola). */
+static size_t report_count(const ConfigReport *r, const char *needle)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < r->count; i++)
+        if (strstr(r->items[i].text, needle) != NULL)
+            n++;
+    return n;
 }
 
 static bool ll_contains(const GraphConfig *cfg, const char *name)
@@ -396,6 +443,258 @@ static void test_warnings_keep_file(void)
     config_free(&cfg);
 }
 
+/* ---------- validazione dei nomi di riferimento ---------- */
+
+/* Il confronto del suffisso ".lock" non deve leggere fuori dal buffer sui nomi
+ * brevi: si esercitano le lunghezze attorno a quella del suffisso (1, 3, 4, 5,
+ * 6 caratteri) e i casi con e senza ".lock". */
+static void test_refname_lengths(void)
+{
+    /* validi: nessuno dei casi deve essere respinto come nome non valido */
+    CHECK(config_refname_syntax_ok("a"), "nome di 1 carattere: valido");
+    CHECK(config_refname_syntax_ok("abc"), "nome di 3 caratteri: valido");
+    CHECK(config_refname_syntax_ok("abcd"), "nome di 4 caratteri: valido");
+    CHECK(config_refname_syntax_ok("abcde"), "nome di 5 caratteri: valido");
+    CHECK(config_refname_syntax_ok("abcdef"), "nome di 6 caratteri: valido");
+    CHECK(config_refname_syntax_ok("lock"), "'lock' senza punto: valido");
+    CHECK(config_refname_syntax_ok("x.locked"), "suffisso simile a .lock: valido");
+    CHECK(config_refname_syntax_ok("olock"), "'lock' iniziale: valido");
+    CHECK(config_refname_syntax_ok("release/1.0"), "nome con barra: valido");
+
+    /* non validi */
+    CHECK(!config_refname_syntax_ok(""), "nome vuoto: non valido");
+    CHECK(!config_refname_syntax_ok("@"), "'@': non valido");
+    CHECK(!config_refname_syntax_ok(".lock"), "solo '.lock': non valido (5 caratteri)");
+    CHECK(!config_refname_syntax_ok("a.lock"), "'a.lock': non valido (6 caratteri)");
+    CHECK(!config_refname_syntax_ok("abcde.lock"), "suffisso .lock: non valido");
+    CHECK(!config_refname_syntax_ok("release/1.0.lock"), ".lock dopo barra: non valido");
+    CHECK(!config_refname_syntax_ok(".abcd"), "iniziale con punto: non valido");
+    CHECK(!config_refname_syntax_ok("abc."), "finale con punto: non valido");
+    CHECK(!config_refname_syntax_ok("/abc"), "iniziale con barra: non valido");
+    CHECK(!config_refname_syntax_ok("abc/"), "finale con barra: non valido");
+    CHECK(!config_refname_syntax_ok("a b"), "spazio: non valido");
+    CHECK(!config_refname_syntax_ok("a..b"), "doppio punto: non valido");
+    CHECK(!config_refname_syntax_ok("a//b"), "doppia barra: non valido");
+    CHECK(!config_refname_syntax_ok("a~b"), "tilde: non valido");
+    CHECK(!config_refname_syntax_ok("a:b"), "due punti: non valido");
+    CHECK(!config_refname_syntax_ok("a[b"), "parentesi: non valido");
+    CHECK(!config_refname_syntax_ok("a@{0}"), "sequenza @{: non valido");
+    CHECK(!config_refname_syntax_ok("a\\b"), "barra rovescia: non valido");
+
+    /* gli stessi nomi brechi passano dal percorso completo del caricamento:
+     * devono risultare "non esistenti" (sintassi valida), non "non validi" */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        const char *text =
+            "[long-lived]\n"
+            "a\n"
+            "abc\n"
+            "abcd\n"
+            "abcde\n"
+            "abcdef\n";
+        bool ok = load_text("brevi.cfg", text, &cfg, &rep);
+        CHECK(ok, "nomi brechi: il file deve restare valido");
+        CHECK(!report_has(&rep, "non e' un nome di riferimento valido"),
+              "nomi brechi: nessuno deve essere respinto come sintassi");
+        CHECK(cfg.long_lived_count == 5, "nomi brechi: tutti long-lived");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+    /* "a.lock" e' invece un nome non valido: la diagnostica deve dirlo */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        bool ok = load_text("lock.cfg", "[long-lived]\na.lock\n", &cfg, &rep);
+        CHECK(ok, "un nome non valido e' un avviso, non un errore");
+        CHECK(report_has(&rep, "non e' un nome di riferimento valido"),
+              "il suffisso .lock deve essere respinto come nome non valido");
+        CHECK(cfg.long_lived_count == 0, "nessun long-lived da un nome non valido");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+}
+
+/* ---------- file assente, illeggibile, vuoto ---------- */
+
+static void test_load_failures(void)
+{
+    /* 1. file assente: nessun errore, nessun messaggio, solo il tronco implicito */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        char err[512];
+        CHECK(config_load(&cfg, "percorso/inesistente.cfg", g_fake, FAKE_COUNT, &rep,
+                          err, sizeof err),
+              "file assente: deve riuscire");
+        CHECK(rep.count == 0, "file assente: nessun messaggio");
+        CHECK(config_long_lived_rank(&cfg, "main") == 0,
+              "file assente: tronco implicito main");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+
+    /* 2. percorso non valido (directory inesistente come file): ENOENT resta
+     *    non errore, perche' il file non esiste nemmeno come directory */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        char err[512];
+        char path[768];
+        snprintf(path, sizeof path, "%s/nessuna_directory/graph.cfg", g_work);
+        CHECK(config_load(&cfg, path, g_fake, FAKE_COUNT, &rep, err, sizeof err),
+              "directory inesistente: nessun file da leggere");
+        CHECK(rep.count == 0, "directory inesistente: nessun messaggio");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+
+    /* 3. il percorso esiste ma e' una directory: file presente e non leggibile
+     *    => errore esplicito, non un silenzio come per un file assente */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        char err[512];
+        char dir[768];
+        snprintf(dir, sizeof dir, "%s/directory.cfg", g_work);
+        REQUIRE(make_dir(dir), "creazione della directory di prova fallita");
+        bool ok = config_load(&cfg, dir, g_fake, FAKE_COUNT, &rep, err, sizeof err);
+        CHECK(!ok, "una directory al posto del file deve fallire");
+        CHECK(rep.count > 0, "una directory non leggibile deve produrre una diagnostica");
+        CHECK(report_has(&rep, "impossibile aprire") || report_has(&rep, "lettura"),
+              "la diagnostica deve distinguere apertura/lettura dal file assente");
+        CHECK(config_report_error_count(&rep) == 1,
+              "il rifiuto per directory deve produrre un solo errore");
+        CHECK(err[0] != '\0', "il messaggio sintetico deve essere compilato");
+        /* rifiuto completo: resta solo il tronco implicito */
+        CHECK(cfg.long_lived_count == 1 && config_long_lived_rank(&cfg, "main") == 0,
+              "file rifiutato: solo il tronco implicito");
+        config_report_free(&rep);
+        config_free(&cfg);
+        remove_dir(dir);
+    }
+
+    /* 4. file vuoto: valido, nessun messaggio, tronco implicito */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        bool ok = load_text("vuoto_vuoto.cfg", "", &cfg, &rep);
+        CHECK(ok, "file vuoto: deve restare valido");
+        CHECK(rep.count == 0, "file vuoto: nessun messaggio");
+        CHECK(config_long_lived_rank(&cfg, "main") == 0, "file vuoto: tronco implicito");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+
+    /* 5. solo commenti: valido, nessun messaggio, tronco implicito */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        const char *text =
+            "# solo commenti\n"
+            "; anche con punto e virgola\n"
+            "\n"
+            "   \n"
+            "# [long-lived] dentro un commento non vale come sezione\n";
+        bool ok = load_text("solo_commenti.cfg", text, &cfg, &rep);
+        CHECK(ok, "solo commenti: deve restare valido");
+        CHECK(rep.count == 0, "solo commenti: nessun messaggio");
+        CHECK(config_long_lived_rank(&cfg, "main") == 0,
+              "solo commenti: tronco implicito");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+}
+
+/* ---------- commenti solo su righe dedicate ---------- */
+
+/* La sintassi scelta e' "commenti su righe dedicate": un '#' o un ';' dentro
+ * una riga di dati fa parte del valore e non tronca nulla. */
+static void test_comment_syntax(void)
+{
+    /* '#' dentro un nome: il nome resta intero e viene applicato */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        const char *text =
+            "[parents]\n"
+            "feat#1 = main\n";
+        bool ok = load_text("hash.cfg", text, &cfg, &rep);
+        CHECK(ok, "'#' dentro un nome non deve rifiutare il file");
+        CHECK(config_report_error_count(&rep) == 0, "'#' nel nome: nessun errore");
+        CHECK(cfg.override_count == 1, "'#' nel nome: l'override deve restare");
+        CHECK(override_parent(&cfg, "feat#1") != NULL,
+              "'#' nel nome: l'override deve valere, non essere troncato");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+    /* ';' dentro un nome: stessa cosa */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        const char *text =
+            "[parents]\n"
+            "feat;x = main\n";
+        bool ok = load_text("punto_virgola.cfg", text, &cfg, &rep);
+        CHECK(ok, "';' dentro un nome non deve rifiutare il file");
+        CHECK(override_parent(&cfg, "feat;x") != NULL,
+              "';' nel nome: l'override deve valere");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+    /* commento in coda a un nome [long-lived]: non e' un commento, quindi il
+     * valore ("main # trunk") e' un nome non valido e viene segnalato, senza
+     * essere troncato a "main" */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        const char *text =
+            "[long-lived]\n"
+            "main # il tronco\n";
+        bool ok = load_text("inline_ll.cfg", text, &cfg, &rep);
+        CHECK(ok, "un nome con spazi e' un avviso, non un errore");
+        CHECK(report_has(&rep, "non e' un nome di riferimento valido"),
+              "un commento in coda deve essere segnalato come nome non valido");
+        CHECK(!ll_contains(&cfg, "main"),
+              "il valore non deve essere troncato a 'main'");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+    /* commento in coda a un override: errore esplicito */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        const char *text =
+            "[parents]\n"
+            "feature/x = main # override\n";
+        bool ok = load_text("inline_parents.cfg", text, &cfg, &rep);
+        CHECK(!ok, "un padre con spazi deve rifiutare il file");
+        CHECK(config_report_error_count(&rep) == 1, "un solo errore atteso");
+        CHECK(cfg.override_count == 0, "l'override non deve essere applicato");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+    /* commenti su righe dedicate: restano il modo supportato */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        const char *text =
+            "# questo e' un commento\n"
+            "[long-lived]\n"
+            "main\n"
+            "; anche questo\n"
+            "release/*\n";
+        bool ok = load_text("dedicated.cfg", text, &cfg, &rep);
+        CHECK(ok, "commenti su righe dedicate: il file deve restare valido");
+        CHECK(rep.count == 0, "commenti su righe dedicate: nessun messaggio");
+        CHECK(config_long_lived_rank(&cfg, "main") == 0, "main long-lived");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+}
+
+/* ---------- cicli di override ---------- */
+
 /* Ciclo di override: avviso (in fase di modello i nodi diventano ambigui). */
 static void test_cycle_warning(void)
 {
@@ -411,6 +710,98 @@ static void test_cycle_warning(void)
     CHECK(report_has(&rep, "ciclo"), "ciclo non segnalato");
     CHECK(config_report_error_count(&rep) == 0, "il ciclo e' un avviso");
     CHECK(cfg.override_count == 3, "i tre override devono restare");
+    /* ogni ciclo viene segnalato una volta sola */
+    CHECK(report_count(&rep, "ciclo di override") == 1,
+          "il ciclo deve essere segnalato una volta sola, trovati %zu messaggi",
+          report_count(&rep, "ciclo di override"));
+    config_report_free(&rep);
+    config_free(&cfg);
+}
+
+/* Nessun ciclo: nessun avviso spurio. */
+static void test_cycle_no_false_positive(void)
+{
+    GraphConfig cfg;
+    ConfigReport rep;
+    const char *text =
+        "[parents]\n"
+        "feature/x = main\n"
+        "bugfix/1 = feature/x\n"
+        "release/1.0 = main\n";
+    bool ok = load_text("no_ciclo.cfg", text, &cfg, &rep);
+    CHECK(ok, "override senza cicli: il file deve restare valido");
+    CHECK(!report_has(&rep, "ciclo di override"), "override senza cicli: nessun avviso di ciclo");
+    CHECK(cfg.override_count == 3, "i tre override devono restare");
+    config_report_free(&rep);
+    config_free(&cfg);
+}
+
+/* Ciclo di due nodi: segnalato una volta. */
+static void test_cycle_two_nodes(void)
+{
+    GraphConfig cfg;
+    ConfigReport rep;
+    const char *text =
+        "[parents]\n"
+        "a = b\n"
+        "b = a\n";
+    bool ok = load_text("ciclo2.cfg", text, &cfg, &rep);
+    CHECK(ok, "un ciclo di due nodi non deve rifiutare il file");
+    CHECK(report_count(&rep, "ciclo di override") == 1, "ciclo di due nodi: un solo avviso");
+    CHECK(config_report_error_count(&rep) == 0, "il ciclo e' un avviso");
+    config_report_free(&rep);
+    config_free(&cfg);
+}
+
+/* Catena lunga con ciclo in fondo: il ciclo e' segnalato una volta sola e i
+ * nodi precedenti non generano avvisi duplicati. */
+static void test_cycle_long_chain(void)
+{
+    GraphConfig cfg;
+    ConfigReport rep;
+    StrBuf text;
+    sb_init(&text);
+    sb_append(&text, "[parents]\n");
+    /* catena di 40 nodi che richiude su se stessa */
+    for (int i = 0; i < 40; i++)
+        sb_appendf(&text, "catena/n%d = catena/n%d\n", i, i + 1);
+    sb_appendf(&text, "catena/n40 = catena/n7\n");
+    char path[768];
+    snprintf(path, sizeof path, "%s/catena_lunga.cfg", g_work);
+    FILE *f = fopen(path, "wb");
+    REQUIRE(f != NULL, "scrittura del file di prova fallita");
+    fwrite(text.data, 1, text.len, f);
+    fclose(f);
+    char err[512];
+    bool ok = config_load(&cfg, path, g_fake, FAKE_COUNT, &rep, err, sizeof err);
+    sb_free(&text);
+    CHECK(ok, "catena con ciclo: il file deve restare valido");
+    CHECK(report_count(&rep, "ciclo di override") == 1,
+          "catena lunga: un solo avviso di ciclo, trovati %zu", report_count(&rep, "ciclo di override"));
+    CHECK(cfg.override_count == 41, "tutti i 41 override devono restare");
+    config_report_free(&rep);
+    config_free(&cfg);
+}
+
+/* Due cicli distinti: due avvisi, uno per ciclo, senza duplicati. */
+static void test_cycle_multiple(void)
+{
+    GraphConfig cfg;
+    ConfigReport rep;
+    const char *text =
+        "[parents]\n"
+        "a = b\n"
+        "b = a\n"
+        "catena/x = catena/y\n"
+        "catena/y = catena/z\n"
+        "catena/z = catena/x\n"
+        "catena/w = main\n";
+    bool ok = load_text("cicli_multipli.cfg", text, &cfg, &rep);
+    CHECK(ok, "cicli distinti: il file deve restare valido");
+    CHECK(report_count(&rep, "ciclo di override") == 2,
+          "due cicli distinti: due avvisi, trovati %zu", report_count(&rep, "ciclo di override"));
+    /* il ramo che non chiude non deve generare avvisi */
+    CHECK(!report_has(&rep, "catena/w"), "un ramo aperto non e' un ciclo");
     config_report_free(&rep);
     config_free(&cfg);
 }
@@ -552,9 +943,16 @@ int main(int argc, char **argv)
 
     test_parse_and_wildcards();
     test_wildcard_rules();
+    test_refname_lengths();
+    test_load_failures();
+    test_comment_syntax();
     test_errors_reject_file();
     test_warnings_keep_file();
     test_cycle_warning();
+    test_cycle_no_false_positive();
+    test_cycle_two_nodes();
+    test_cycle_long_chain();
+    test_cycle_multiple();
     test_end_to_end();
 
     printf("%d test superati, %d falliti\n", g_pass, g_fail);
