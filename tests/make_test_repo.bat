@@ -3,17 +3,16 @@ rem ---------------------------------------------------------------------------
 rem make_test_repo.bat [percorso]
 rem
 rem Crea un repository Git isolato e ripetibile per i test di gitgraph.
-rem Il percorso arriva da: argomento 1, variabile GG_TEST_REPO, oppure
-rem %TEMP%\gitgraph_test_repo.
+rem Il percorso arriva da: argomento 1 oppure variabile GG_TEST_REPO.
 rem
-rem SICUREZZA: lo script cancella una directory solo se e' una directory di test
-rem dedicata: il nome finale deve essere "gitgraph_test_repo" oppure
-rem "gitgraph_test_repo_<scenario>", il percorso non puo' contenere "." o "..",
-rem non puo' essere la radice, la directory corrente, la home o quella
-rem temporanea e, se la directory esiste, deve contenere il marcatore
-rem .gitgraph_test_repo con il testo esatto "gitgraph test repository" e nessun
-rem file diverso da quelli creati qui. Altrimenti lo script fallisce senza
-rem toccare nulla: il marcatore da solo non autorizza nessuna cancellazione.
+rem SICUREZZA: la cancellazione ricorsiva e' autorizzata solo dentro la radice
+rem dei repository di test indicata da GG_TEST_ROOT (impostata da CMake, che
+rem crea anche la directory) e solo se valgono tutte le condizioni elencate nel
+rem blocco "SICUREZZA" piu' sotto: nome finale ammesso, nessun "." o ".." nel
+rem percorso, parentela esattamente uguale alla radice risolta, percorsi
+rem pericolosi esclusi, marcatore con il testo esatto e nessun file estraneo.
+rem Altrimenti lo script fallisce senza toccare nulla: ne' il nome della
+rem directory ne' il marcatore, da soli, autorizzano mai una cancellazione.
 rem
 rem Contenuto: main(A,B,C), branch1 da B, branch2 da B2, merge --no-ff,
 rem fast-forward, branch cancellato dopo il merge, gruppo di alias (piu' branch
@@ -27,48 +26,90 @@ rem ---------------------------------------------------------------------------
 setlocal enableextensions
 set "REPO=%~1"
 if "%REPO%"=="" set "REPO=%GG_TEST_REPO%"
-if "%REPO%"=="" set "REPO=%TEMP%\gitgraph_test_repo"
 set "MARKER=.gitgraph_test_repo"
 set "MARKERTEXT=gitgraph test repository"
 set "BASENAME=gitgraph_test_repo"
 
 rem --- SICUREZZA: cosa puo' essere cancellato --------------------------------
-rem Lo script cancella una directory solo se tutte queste condizioni valgono:
-rem   1. il percorso non e' vuoto e non contiene "." o ".." (nessuna risoluzione
-rem      ambigua: i percorsi con puntini vengono rifiutati, non normalizzati);
-rem   2. il nome finale e' esattamente %BASENAME% oppure %BASENAME%_<scenario>
-rem      (whitelist: nessuna directory arbitraria puo' essere cancellata);
-rem   3. il percorso non e' la radice del filesystem, la directory corrente,
+rem La cancellazione ricorsiva e' autorizzata solo dentro la radice dei
+rem repository di test indicata da GG_TEST_ROOT (impostata da CMake, creata
+rem dalla configurazione) e solo se valgono TUTTE le condizioni seguenti:
+rem   1. GG_TEST_ROOT e' impostata, esiste come directory e viene risolta a
+rem      percorso completo (%%~f: normalizza "/" e "\", majuscole/minuscole e
+rem      percorsi relativi);
+rem   2. il percorso richiesto e' non vuoto e non contiene "." o "..";
+rem   3. la directory padre del percorso risolto coincide ESATTAMENTE con la
+rem      radice risolta (uguaglianza, non confronto di prefisso: una directory
+rem      sorella con nome simile, es. "test_repos_extra", non e' dentro);
+rem   4. il nome finale e' esattamente %BASENAME% oppure %BASENAME%_<scenario>
+rem      (whitelist del nome);
+rem   5. il percorso non e' la radice del filesystem, la directory corrente,
 rem      la home o la directory temporanea;
-rem   4. se la directory esiste, contiene il marcatore %MARKER% con il testo
-rem      esatto %MARKERTEXT% e non contiene altri file oltre quelli creati qui
-rem      (il marcatore da solo non autorizza nessuna cancellazione).
-rem Altrimenti lo script fallisce senza toccare nulla.
+rem   6. se la directory esiste, coincide con radice+nome, non e' un
+rem      collegamento (giunzione o simbolico), contiene il marcatore %MARKER%
+rem      con il testo esatto %MARKERTEXT% e null'altro oltre ai file creati qui.
+rem Altrimenti lo script fallisce senza toccare nulla: il solo nome della
+rem directory non autorizza mai nessuna cancellazione.
+
+rem --- 1. radice autorizzata -------------------------------------------------
+if "%GG_TEST_ROOT%"=="" goto :unsafe_no_root
+for %%R in ("%GG_TEST_ROOT%") do set "ROOTRES=%%~fR"
+if "%ROOTRES:~-1%"=="\" set "ROOTRES=%ROOTRES:~0,-1%"
+if "%ROOTRES%"=="" goto :unsafe_no_root
+if not exist "%ROOTRES%\" goto :unsafe_no_root
+
+rem --- 2. percorso vuoto o con puntini ---------------------------------------
+rem controlli indipendenti dal separatore: ".." in qualsiasi posizione e una
+rem "." finale (con "/" o "\") renderebbero la risoluzione ambigua
 if "%REPO%"=="" goto :unsafe_empty
-rem ".." in qualsiasi posizione e una "\." finale: percorsi non risolvibili
-set "LAST2=%REPO:~-2%"
-if "%LAST2%"=="\." goto :unsafe_dots
+if "%REPO:~-1%"=="." goto :unsafe_dots
 echo "%REPO%" | findstr /r /c:"\.\." >nul && goto :unsafe_dots
+
+rem --- 3. percorso risolto e percorsi pericolosi ---------------------------
+rem %%~f produce il percorso completo con "/" e "\" normalizzati, senza puntini
+rem e con i nomi lunghi. I percorsi pericolosi si escludono qui, prima del
+rem confronto con la radice: cosi' nessun percorso finito con "\" (la radice
+rem del filesystem) raggiunge una "call", che lo romperebbe.
 for %%I in ("%REPO%") do set "REPORES=%%~fI"
+if "%REPORES%"=="" goto :unsafe_outside
 if "%REPORES%"=="\" goto :unsafe_root
 set "DRIVEONLY=%SystemDrive%\"
 if /i "%REPORES%"=="%DRIVEONLY%" goto :unsafe_root
-rem gli helper leggono REPORES dal%: passare il percorso come argomento di
-rem "call" e' fragile quando termina con "\" (rompe il parsing di cmd)
-call :check_name || goto :unsafe_name
 if /i "%REPORES%"=="%CD%" goto :unsafe_same
 if /i "%REPORES%"=="%USERPROFILE%" goto :unsafe_home
 if /i "%REPORES%"=="%TEMP%" goto :unsafe_temp
 if /i "%REPORES%"=="%TMP%" goto :unsafe_temp
+rem una barra finale non cambia la destinazione ma altererebbe il calcolo della
+rem directory padre: qui la radice e gia' stata esclusa, quindi si puo' togliere
+if "%REPORES:~-1%"=="\" set "REPORES=%REPORES:~0,-1%"
+
+rem --- 4. contenimento nella radice autorizzata ------------------------------
+rem La parentela viene calcolata dalla directory risolta e confrontata per
+rem uguaglianza (case insensitive), mai per prefisso: cosi' una directory
+rem sorella con nome simile, es. "test_repos_extra", non risulta contenuta.
+call :parent_of "%REPORES%" || goto :unsafe_outside
+
+rem --- 5. nome finale ammesso ------------------------------------------------
+rem gli helper leggono REPORES dal%: passare il percorso come argomento di
+rem "call" e' fragile quando termina con "\" (rompe il parsing di cmd)
+call :check_name || goto :unsafe_name
+
 if exist "%REPORES%\" goto :exists
 mkdir "%REPORES%" || goto :err
 goto :created
 
 :exists
+rem --- 6. la directory esistente deve essere proprio la nostra --------------
+for %%I in ("%REPORES%") do set "DESTRES=%%~fI"
+for %%I in ("%REPORES%") do set "DESTBASE=%%~nxI"
+if /i not "%DESTRES%"=="%ROOTRES%\%DESTBASE%" goto :unsafe_outside
+rem nessun collegamento: una giunzione o un collegamento simbolico porterebbe
+rem la cancellazione ricorsiva fuori dalla radice autorizzata
+set "ISLINK="
+for /f "delims=" %%L in ('dir /a:l /b "%PARENTRES%" 2^>nul') do if /i "%%L"=="%DESTBASE%" set "ISLINK=1"
+if defined ISLINK goto :unsafe_link
 if not exist "%REPORES%\%MARKER%" goto :unsafe_foreign
-set "MARKEROK="
-for /f "usebackq delims=" %%L in ("%REPORES%\%MARKER%") do if /i "%%L"=="%MARKERTEXT%" set "MARKEROK=1"
-if not defined MARKEROK goto :unsafe_foreign
+call :check_marker || goto :unsafe_foreign
 call :check_entries || goto :unsafe_foreign
 rmdir /s /q "%REPORES%" || goto :err
 mkdir "%REPORES%" || goto :err
@@ -286,7 +327,7 @@ git -C "%REPO%" update-ref refs/remotes/origin/feature-x feature/x || goto :err
 echo OK: %REPO%
 exit /b 0
 
-rem --- helper: nome finale ammesso (whitelist) -------------------------------
+rem --- helper: il nome finale e' ammesso -------------------------------------
 rem lavora su %REPORES%: %1 non e' usato perche' un percorso che termina con
 rem "\" rompe il parsing di "call".
 :check_name
@@ -294,6 +335,33 @@ for %%F in ("%REPORES%") do set "CHECKBASE=%%~nxF"
 if /i "%CHECKBASE%"=="%BASENAME%" exit /b 0
 if /i not "%CHECKBASE:~0,19%"=="%BASENAME%_" exit /b 1
 if "%CHECKBASE:~19%"=="" exit /b 1
+exit /b 0
+
+rem --- helper: la destinazione e' dentro la radice autorizzata ----------------
+rem %1 = percorso risolto della destinazione (gia' escluso quello finito con
+rem "\"). %~dp1 restituisce la directory che lo contiene: viene confrontata con
+rem la radice risolta per uguaglianza, non per prefisso.
+:parent_of
+set "PARENTRES=%~dp1"
+if "%PARENTRES:~-1%"=="\" set "PARENTRES=%PARENTRES:~0,-1%"
+if "%PARENTRES%"=="" exit /b 1
+if /i not "%PARENTRES%"=="%ROOTRES%" exit /b 1
+exit /b 0
+
+rem --- helper: il marcatore contiene esattamente il testo previsto ----------
+rem %REPORES%\<marcatore> deve valere "%MARKERTEXT%": niente righe in piu', niente
+rem testo prima o dopo. Sono ammessi solo il testo da solo o con il terminatore
+rem di riga atteso (LF o CRLF): quindi 25, 26 o 27 byte. Il controllo della
+rem dimensione fissa lo scarto di qualsiasi contenuto aggiuntivo, il confronto
+rem della prima riga fissa il testo (le variabili sono rilette fuori dai
+rem blocchi, per non dover usare l'espansione ritardata).
+:check_marker
+set "MARKERFILE=%REPORES%\%MARKER%"
+for %%F in ("%MARKERFILE%") do set "MARKSIZE=%%~zF"
+if not "%MARKSIZE%"=="25" if not "%MARKSIZE%"=="26" if not "%MARKSIZE%"=="27" exit /b 1
+set "MARKERLINE="
+set /p "MARKERLINE=" < "%MARKERFILE%"
+if not "%MARKERLINE%"=="%MARKERTEXT%" exit /b 1
 exit /b 0
 
 rem --- helper: la directory contiene solo i file che lo script crea ----------
@@ -307,6 +375,17 @@ for /f "delims=" %%E in ('dir /b /a "%CHECKDIR%" 2^>nul') do (
 if defined UNEXPECTED exit /b 1
 exit /b 0
 
+:unsafe_no_root
+echo ERRORE: GG_TEST_ROOT non e' impostata o non e' una directory esistente. & exit /b 1
+echo         La radice dei repository di test e' l'unica destinazione ammessa. & exit /b 1
+:unsafe_outside
+echo ERRORE: "%REPORES%" non e' dentro la radice autorizzata "%ROOTRES%". & exit /b 1
+echo         Niente viene cancellato: la destinazione deve essere un nome & exit /b 1
+echo         ammesso (%BASENAME% o %BASENAME%_<scenario>) direttamente in essa. & exit /b 1
+:unsafe_link
+echo ERRORE: "%REPORES%" e' un collegamento (giunzione o simbolico): rifiutato. & exit /b 1
+echo         Niente viene cancellato: un collegamento puo' puntare fuori dalla & exit /b 1
+echo         radice autorizzata. & exit /b 1
 :unsafe_empty
 echo ERRORE: percorso del repository di prova vuoto & exit /b 1
 :unsafe_dots

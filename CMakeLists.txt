@@ -63,31 +63,40 @@ target_link_libraries(test_config PRIVATE gg_core)
 add_executable(scale_repo_gen tests/make_scale_repo.c)
 
 # Repository di prova generato prima dei test (fixture ctest). La generazione
-# passa da uno script CMake che invoca lo script di piattaforma: ctest non
-# lancia mai "cmd /c" direttamente (quoting di cmd poco controllabile).
-# Il nome della directory deve essere uno di quelli ammessi dallo script
-# (whitelist delle directory di test).
-set(GG_TEST_REPO "${CMAKE_CURRENT_BINARY_DIR}/gitgraph_test_repo"
+# passa da uno script CMake che invoca make_test_repo.bat: ctest non lancia
+# mai "cmd /c" direttamente (quoting di cmd poco controllabile).
+#
+# GG_TEST_ROOT e' la radice autorizzata dei repository di test: e' l'unica
+# destinazione in cui lo script puo' creare o cancellare qualcosa, quindi viene
+# creata qui e passata allo script. GG_TEST_REPO deve stare dentro questa
+# radice e il suo nome finale deve essere uno di quelli ammessi dallo script.
+set(GG_TEST_ROOT "${CMAKE_CURRENT_BINARY_DIR}/test_repos"
+    CACHE PATH "Radice autorizzata dei repository di test")
+file(MAKE_DIRECTORY "${GG_TEST_ROOT}")
+set(GG_TEST_REPO "${GG_TEST_ROOT}/gitgraph_test_repo"
     CACHE PATH "Repository Git generato per i test")
 add_test(NAME make_test_repo
          COMMAND "${CMAKE_COMMAND}"
                  "-DGG_TEST_REPO=${GG_TEST_REPO}"
+                 "-DGG_TEST_ROOT=${GG_TEST_ROOT}"
                  "-DGG_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
                  "-P"
                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/make_test_repo_fixture.cmake")
 set_tests_properties(make_test_repo PROPERTIES FIXTURES_SETUP testrepo)
 
-# Protezioni dello script di generazione: percorsi non ammessi, directory
-# estranee con il marcatore, percorsi con "." e "..", radice del filesystem,
-# argomento vuoto e rigenerazione normale. Tutto avviene in una sandbox sotto
-# la build: nessun dato reale viene toccato.
+# Protezioni dello script di generazione: destinazione fuori dalla radice
+# autorizzata, prefisso simile alla radice, directory estranea con il marcatore,
+# marcatore con testo diverso, file estranei, percorsi con "." e "..", radice del
+# filesystem, argomento vuoto, rigenerazione e percorsi con forme diverse
+# (separatori, maiuscole, relativi). Tutto avviene in una sandbox sotto la
+# build: nessun dato reale viene toccato.
 add_test(NAME scripts_guard
          COMMAND "${CMAKE_COMMAND}"
                  "-DGG_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
                  "-DGG_GUARD_DIR=${CMAKE_CURRENT_BINARY_DIR}/guard_sandbox"
                  "-P"
                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scripts_guard.cmake")
-set_tests_properties(scripts_guard PROPERTIES TIMEOUT 600)
+set_tests_properties(scripts_guard PROPERTIES TIMEOUT 900)
 
 add_test(NAME core COMMAND test_core "${GG_TEST_REPO}")
 set_tests_properties(core PROPERTIES FIXTURES_REQUIRED testrepo)

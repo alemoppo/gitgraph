@@ -202,11 +202,16 @@ costruzione del modello).
 Undici test, nessuno con finestra:
 
 1. `make_test_repo` genera il repository di prova;
-2. `scripts_guard` verifica le protezioni di `make_test_repo.bat`: nome della
-   directory non ammesso, suffisso di scenario ammesso, directory estranea che
-   contiene il marcatore, marcatore con testo diverso, directory di test con
-   file estranei, percorsi con `.` e `..`, radice del filesystem, argomento
-   vuoto e rigenerazione normale. Tutto avviene in una sandbox sotto `build/`;
+2. `scripts_guard` verifica le protezioni di `make_test_repo.bat`: creazione e
+   rigenerazione dentro la radice autorizzata (comprese forme diverse del
+   percorso: barre in avanti, barra finale, maiuscole, suffisso di scenario),
+   rifiuto di una directory valida fuori dalla radice, di una sorella con nome
+   simile (`test_repos_extra`), di una destinazione che è una giunzione, di
+   marcatore con testo aggiuntivo o diverso, di directory con file estranei,
+   dei tentativi di uscire con `..`, della radice del filesystem e della home,
+   di nome non ammesso, di radice non impostata o inesistente e di argomento
+   vuoto. Ogni caso negativo verifica anche che i file sentinella siano ancora
+   presenti e inalterati. Tutto avviene in una sandbox sotto `build/`;
 3. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
    per data, override, long-lived, determinismo, quoting degli argomenti e
    cattura di stdout/stderr senza blocco (pipe riempite oltre la capacita',
@@ -248,19 +253,34 @@ genitore** di un merge, merge ripetuti dello stesso branch, storia **ribasata**
 condivisi (genealogia non determinabile), branch con slash, tag annotati e
 leggeri multipli, uno stash (da escludere) e un messaggio UTF-8 multi-riga.
 
-Lo script `make_test_repo.bat` accetta come destinazione **solo** directory di
-test dedicate e cancella **solo** quelle. Tutte queste condizioni devono
-valere, altrimenti lo script fallisce senza toccare nulla:
+Lo script `make_test_repo.bat` cancella qualcosa **solo** dentro la radice dei
+repository di test, quella indicata da `GG_TEST_ROOT` (impostata da CMake, che
+crea anche la directory: `build/test_repos` per configurazione predefinita).
+Il percorso della destinazione arriva dall'argomento 1 o da `GG_TEST_REPO`; se
+entrambi mancano lo script si rifiuta, senza alcun percorso predefinito.
+Tutte queste condizioni devono valere, altrimenti lo script fallisce senza
+toccare nulla:
 
-- il percorso non contiene `.` o `..` (nessuna risoluzione ambigua);
+- `GG_TEST_ROOT` è impostata ed esiste come directory;
+- il percorso non contiene `.` o `..` e non termina con `.` (nessuna
+  risoluzione ambigua);
+- una volta risolto (`/` e `\` normalizzati, percorso completo), il **padre**
+  della destinazione coincide **esattamente** con la radice: il confronto è
+  per uguaglianza, mai per prefisso, quindi una directory sorella con nome
+  simile (`test_repos_extra`) non è considerata dentro;
 - il nome finale è `gitgraph_test_repo` oppure `gitgraph_test_repo_<scenario>`
-  (whitelist: nessuna directory arbitraria può essere cancellata);
-- il percorso non è la radice del filesystem, la directory corrente, la home
-  o quella temporanea;
-- se la directory esiste, contiene il marcatore `.gitgraph_test_repo` con il
-  testo esatto `gitgraph test repository` e nessun file diverso da quelli
-  creati dallo script (`.git`, `hello.txt`, `wip.txt`, `msg-c.txt`).
+  (whitelist del nome);
+- il percorso non è la radice del filesystem, la directory corrente, la home o
+  quella temporanea;
+- se la directory esiste: coincide con radice + nome, **non è un collegamento**
+  (giunzione o simbolico, che porterebbero la cancellazione fuori dalla radice),
+  contiene il marcatore `.gitgraph_test_repo` con **esattamente** il testo
+  `gitgraph test repository` (eventualmente seguito dal solo terminatore di
+  riga: nessuna riga in più, nessun testo prima o dopo) e nessun file diverso
+  da quelli creati dallo script (`.git`, `hello.txt`, `wip.txt`, `msg-c.txt`).
 
-Il solo marcatore non autorizza nessuna cancellazione: è una delle condizioni,
-non un suffisso sufficiente. Le verifiche sono coperte dal test
-`scripts_guard`, che lavora solo dentro `build/guard_sandbox`.
+Il nome della directory e il marcatore, da soli, **non** autorizzano mai una
+cancellazione: sono due delle condizioni, non un suffisso sufficiente. Tutte le
+verifiche sono coperte dal test `scripts_guard`, che lavora solo dentro
+`build/guard_sandbox` e verifica, per ogni caso negativo, sia il rifiuto sia
+l'integrità dei file sentinella.
