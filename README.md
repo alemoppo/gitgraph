@@ -199,30 +199,18 @@ costruzione del modello).
 
     ctest --test-dir build --output-on-failure
 
-Undici test, nessuno con finestra:
+Dieci test, nessuno con finestra:
 
-1. `make_test_repo` genera il repository di prova;
-2. `scripts_guard` verifica le protezioni di `make_test_repo.bat`: creazione e
-   rigenerazione dentro la radice autorizzata (comprese forme diverse del
-   percorso: barre in avanti, barra finale, maiuscole, suffisso di scenario),
-   rifiuto di una directory valida fuori dalla radice, di una sorella con nome
-   simile (`test_repos_extra`), di una **radice che è una giunzione** verso
-   l'esterno (con la destinazione fisica verificata intatta), di una
-   destinazione che è una giunzione, dei marcatori non ammessi (27 byte con la
-   prima riga corretta, terminatore misto, testo aggiuntivo) e di quelli ammessi
-   (24, 25 e 26 byte: devono essere accettati e rigenerati), di directory con
-   file estranei, dei tentativi di uscire con `..`, della radice del filesystem
-   e della home, di nome non ammesso, di radice non impostata o inesistente e
-   di argomento vuoto. Ogni caso negativo verifica anche che i file sentinella
-   siano ancora presenti e inalterati; se `mklink` non è disponibile i casi che
-   richiedono una giunzione sono dichiarati **saltati**, mai superati. Tutto
-   avviene in una sandbox sotto `build/`;
-3. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
-   per data, override, long-lived, determinismo, quoting degli argomenti e
-   cattura di stdout/stderr senza blocco (pipe riempite oltre la capacita',
+1. `make_test_repo` genera il repository di prova (la fixture rimuove prima la
+   cartella dei repository di test, dentro la build);
+2. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
+   per data, override, long-lived, determinismo, quoting degli argomenti,
+   cattura di stdout/stderr senza blocco (pipe riempite oltre la capacità,
    entrambe le pipe attive contemporaneamente, uscita non zero e fallimento
-   della creazione dei thread di lettura);
-4. `config` verifica `graph.cfg`: sezioni, commenti su righe dedicate, `#` e
+   della creazione dei thread di lettura) e sicurezza della ricerca di git:
+   un `git.exe` finto nella directory corrente non deve mai essere eseguito al
+   posto del vero;
+3. `config` verifica `graph.cfg`: sezioni, commenti su righe dedicate, `#` e
    `;` dentro i nomi, BOM/CRLF, wildcard con ordine naturale, barra
    attraversata, priorita' della prima riga che corrisponde, riferimenti remoti
    per nome canonico, tronco implicito, validazione dei nomi di riferimento
@@ -232,12 +220,12 @@ Undici test, nessuno con finestra:
    cicli distinti, ciascuno segnalato una volta) e uso end-to-end dentro il
    repository di prova (override → stato `configurato`, long-lived senza fork
    né candidati, remoto con punta diversa che mantiene la genealogia dedotta);
-5. `dump_smoke` esegue lo strumento di dump;
-6. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
+4. `dump_smoke` esegue lo strumento di dump;
+5. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
    3 s;
-7. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
+6. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
    30 s (determinismo verificato anche sul repository grande);
-8. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
+7. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
    15 s, con ogni branch nato dal precedente (catena profonda): verifica il
    controllo delle relazioni circolari e l'ordinamento dei padri.
 
@@ -258,48 +246,18 @@ genitore** di un merge, merge ripetuti dello stesso branch, storia **ribasata**
 condivisi (genealogia non determinabile), branch con slash, tag annotati e
 leggeri multipli, uno stash (da escludere) e un messaggio UTF-8 multi-riga.
 
-Lo script `make_test_repo.bat` cancella qualcosa **solo** dentro la radice dei
-repository di test, quella indicata da `GG_TEST_ROOT` (impostata da CMake, che
-crea anche la directory: `build/test_repos` per configurazione predefinita).
-Il percorso della destinazione arriva dall'argomento 1 o da `GG_TEST_REPO`; se
-entrambi mancano lo script si rifiuta, senza alcun percorso predefinito.
-Tutte queste condizioni devono valere, altrimenti lo script fallisce senza
-toccare nulla:
-
-- `GG_TEST_ROOT` è impostata, esiste come directory e **non è un collegamento**:
-  il controllo guarda gli attributi del filesystem e sale fino alla radice del
-  filesystem, perché il confronto testuale dei percorsi non risolve i
-  collegamenti (una radice-giunzione verso l'esterno passerebbe il confronto con
-  il padre della destinazione). In caso di dubbio (controllo non eseguibile,
-  permessi, PowerShell non disponibile) la cancellazione viene rifiutata;
-- il percorso non contiene `.` o `..` e non termina con `.` (nessuna
-  risoluzione ambigua);
-- una volta risolto (`/` e `\` normalizzati, percorso completo), il **padre**
-  della destinazione coincide **esattamente** con la radice: il confronto è
-  per uguaglianza, mai per prefisso, quindi una directory sorella con nome
-  simile (`test_repos_extra`) non è considerata dentro;
-- il nome finale è `gitgraph_test_repo` oppure `gitgraph_test_repo_<scenario>`
-  (whitelist del nome);
-- il percorso non è la radice del filesystem, la directory corrente, la home o
-  quella temporanea;
-- se la directory esiste: coincide con radice + nome, **non è un collegamento**
-  (giunzione o simbolico, che porterebbero la cancellazione fuori dalla radice;
-  per la destinazione è sufficiente il percorso stesso, perché i suoi antenati
-  sono la radice, già verificata), contiene il marcatore `.gitgraph_test_repo`
-  con **esattamente** il testo `gitgraph test repository` e nessun altro byte:
-  il confronto è fatto sui byte (24 senza terminatore, 25 con LF, 26 con CRLF),
-  perché leggere solo la prima riga accetterebbe contenuti aggiuntivi che non
-  la modificano; e nessun file diverso da quelli creati dallo script (`.git`,
-  `hello.txt`, `wip.txt`, `msg-c.txt`).
-
-Il nome della directory e il marcatore, da soli, **non** autorizzano mai una
-cancellazione: sono due delle condizioni, non un suffisso sufficiente. Tutte le
-verifiche sono coperte dal test `scripts_guard`, che lavora solo dentro
-`build/guard_sandbox` e verifica, per ogni caso negativo, sia il rifiuto sia
-l'integrità dei file sentinella.
+Lo script `make_test_repo.bat` crea il repository e **non cancella mai nulla**:
+se la directory di destinazione non esiste o e' vuota la usa, altrimenti esce
+con errore. La pulizia prima di ogni esecuzione la fa CMake
+(`tests/make_test_repo_fixture.cmake`), che rimuove con `file(REMOVE_RECURSE ...)`
+la sola cartella dei repository di test dentro la directory di build
+(`build/test_repos` per configurazione predefinita) e si rifiuta di procedere
+se `GG_TEST_REPO` fosse spostato fuori da quella cartella. Non servono piu'
+marcatori, controlli sui collegamenti ne' file sentinella: sono costi che
+diventano inutili quando a cancellare e' solo CMake, con un percorso noto.
 
 I percorsi possono contenere spazi e caratteri che `cmd.exe` tratta in modo
-speciale (`&` è un separatore di comandi): lo script non assembla mai
-frammenti di riga di comando dentro variabili e passa ogni percorso ai
-programmi esterni come argomento quotato sul posto, quindi una build situata,
-per esempio, in `C:\dev\repo & build` continua a funzionare.
+speciale (`&` e' un separatore di comandi): i percorsi arrivano tramite variabili
+d'ambiente, che `cmd.exe` non viene reinterpretato, e quelli passati in linea di
+comando sono quotati sul posto. Una build situata, per esempio, in
+`C:\dev\repo & build` continua a funzionare.

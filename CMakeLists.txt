@@ -70,12 +70,11 @@ add_executable(fake_git tests/fake_git.c)
 # passa da uno script CMake che invoca make_test_repo.bat: ctest non lancia
 # mai "cmd /c" direttamente (quoting di cmd poco controllabile).
 #
-# GG_TEST_ROOT e' la radice autorizzata dei repository di test: e' l'unica
-# destinazione in cui lo script puo' creare o cancellare qualcosa, quindi viene
-# creata qui e passata allo script. GG_TEST_REPO deve stare dentro questa
-# radice e il suo nome finale deve essere uno di quelli ammessi dallo script.
+# Lo script crea il repository e non cancella mai nulla: la pulizia la fa
+# questa fixture, che rimuove la sola cartella dei repository di test dentro
+# la directory di build (per questo GG_TEST_REPO non puo' star fuori).
 set(GG_TEST_ROOT "${CMAKE_CURRENT_BINARY_DIR}/test_repos"
-    CACHE PATH "Radice autorizzata dei repository di test")
+    CACHE PATH "Cartella dei repository di test (dentro la build)")
 file(MAKE_DIRECTORY "${GG_TEST_ROOT}")
 set(GG_TEST_REPO "${GG_TEST_ROOT}/gitgraph_test_repo"
     CACHE PATH "Repository Git generato per i test")
@@ -87,20 +86,6 @@ add_test(NAME make_test_repo
                  "-P"
                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/make_test_repo_fixture.cmake")
 set_tests_properties(make_test_repo PROPERTIES FIXTURES_SETUP testrepo)
-
-# Protezioni dello script di generazione: destinazione fuori dalla radice
-# autorizzata, prefisso simile alla radice, directory estranea con il marcatore,
-# marcatore con testo diverso, file estranei, percorsi con "." e "..", radice del
-# filesystem, argomento vuoto, rigenerazione e percorsi con forme diverse
-# (separatori, maiuscole, relativi). Tutto avviene in una sandbox sotto la
-# build: nessun dato reale viene toccato.
-add_test(NAME scripts_guard
-         COMMAND "${CMAKE_COMMAND}"
-                 "-DGG_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
-                 "-DGG_GUARD_DIR=${CMAKE_CURRENT_BINARY_DIR}/guard_sandbox"
-                 "-P"
-                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scripts_guard.cmake")
-set_tests_properties(scripts_guard PROPERTIES TIMEOUT 900)
 
 # Riceve anche il percorso del finto git.exe, per il test di sicurezza sulla
 # ricerca del programma.
