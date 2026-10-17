@@ -135,13 +135,28 @@ padre, stato e motivazione. `--full` mostra i messaggi di commit completi.
 ## Modello dei branch (sintesi)
 
 - **Punto di diramazione**: il primo commit, risalendo la catena dei primi
-  genitori dalla punta del branch, che appartiene alla *regione propria* di
-  un'altra famiglia di branch. Non e' la raggiungibilita' generica: dopo un
-  merge i commit del branch sono raggiungibili da altri, ma la catena dei primi
+  genitori dalla punta del branch, in cui un'altra famiglia e' un plausibile
+  padre. I candidati sono le famiglie che contengono quel commit, che non stanno
+  dentro il branch (discendenti o continuazioni) e che non sono figli suoi (nate
+  dalla sua catena). Non e' la raggiungibilita' generica: dopo un merge i
+  commit del branch sono raggiungibili da altri, ma la catena dei primi
   genitori non li attraversa, quindi il fork resta quello vero. Il calcolo non
   dipende dall'ordine dei nomi: un branch che incontra la **punta** di un
   altro ramo si e' diramato li'; i tronchi (long-lived) proseguono sempre, per
- che non possono essere una diramazione di un altro ramo.
+  che non possono essere una diramazione di un altro ramo.
+- **Proprietario e commit condivisi**: solo i tronchi possiedono commit in modo
+  incondizionato (fra due tronchi che si incontrano vale il primo nell'ordine
+  di `[long-lived]`, cioe' quello dichiarato). Un commit sulla catena di due o
+  piu' famiglie non-tronco, senza un tronco che lo contenga, e' **condiviso**:
+  non ha un proprietario e nessun branch se lo rivendica "per primo". E' il
+  punto in cui il modello precedente sbagliava: la famiglia visitata per prima
+  (quella col nome alfabeticamente minore) se lo prendeva e gli altri la
+  trattavano come diramazione da lei.
+- **Il nome non decide niente**: l'ordine alfabetico non entra in nessuna
+  regola; i confronti fra famiglie usano la struttura dei commit e, quando
+  serve, l'orario dei commit (dato di Git). Il test `invariance` permuta i
+  nomi e verifica che stato, padre, candidati e padre suggerito restino
+  identici in ogni permutazione.
 - **Ogni riferimento conserva la sua punta**: due riferimenti con lo stesso
   nome canonico ma punte diverse (`main` e `origin/main` indietro di un
   commit) restano due riferimenti distinti, ciascuno con la propria punta; lo
@@ -158,21 +173,38 @@ padre, stato e motivazione. `--full` mostra i messaggi di commit completi.
 - **Stati del padre**: `certo` (fatto ricavato da Git: uno specchio che punta
   allo stesso commit di un branch locale), `configurato` (dichiarato in
   `[parents]` di `graph.cfg`, non un fatto dedotto), `dedotto` (una sola
-  ipotesi plausibile; quando il punto di diramazione appartiene alla regione
-  propria di un solo candidato, e' quello il padre), `ambiguo` (piu' ipotesi
-  indistinguibili: non si inventa un padre), `nessuno`.
+  ipotesi plausibile), `ambiguo` (piu' ipotesi indistinguibili: non si inventa
+  un padre), `nessuno`. Si sceglie in quest'ordine: se il punto di diramazione
+  e' la punta di un'altra famiglia, quella famiglia e' il padre (lo decide la
+  struttura); se fra i candidati c'e' un tronco, e' il padre (un long-lived non
+  si deduce, e' dichiarato); se resta un solo candidato, e' il padre dedotto;
+  se ne restano piu' di uno, lo stato e' `ambiguo` con l'elenco dei candidati.
+- **Padre suggerito** (`suggested_parent`, `suggestion_basis`): nei casi
+  ambigui con piu' candidati il modello indica un suggerimento, **non** un
+  padre: non e' uno stato "certo" ne' "dedotto". Il criterio e' documentato e
+  verificato dal test: fra i candidati e' il piu' vecchio (col primo commit
+  proprio piu' vecchio), a parita' di date e' il nome, e la motivazione dichiara
+  la base del suggerimento ("padre suggerito per data, poco affidabile con
+  rebase", oppure lo spareggio sul nome). Serve al layout per piazzare il branch
+  in modo tratteggiato finche' il padre non e' dichiarato.
+- **Gli ambigui si risolvono con `[parents]`**: finche' il padre non e'
+  dichiarato in `graph.cfg`, il caso resta ambiguo e il layout mostra il
+  suggerimento come tratteggio. Un override valido ha precedenza assoluta e
+  rende il padre `configurato`. Esempio: nel repository di prova `branch2` e'
+  nato da un commit (B2) che sta sia sulla catena di `branch1` sia su quella di
+  `sp`, quindi e' ambiguo fra i due e il suggerimento e' `branch1`;
+  `parents = branch2 branch1` lo rende certo.
 - **Gruppi di alias**: piu' riferimenti sulla stessa punta formano una
   famiglia (stessa catena, quindi stesso padre dedotto); fra piu' branch
   **locali** sulla stessa punta resta ambiguo quale sia il nome del padre, e
   la motivazione lo dichiara.
 - **Long-lived**: sono il tronco o le linee principali; non hanno padre
   dedotto, ne' punto di diramazione, ne' candidati.
-- **Date**: usate solo come spareggio quando la struttura non decide (per
-  esempio fra diramazioni nate dallo stesso commit). La motivazione dichiara
-  lo scarto per data, avvertendo che e' poco affidabile con rebase, **solo se
-  l'ordinamento per data ha cambiato davvero il risultato**: se il padre
-  sarebbe stato lo stesso senza, la frase non compare, perche' allora la data
-  non ha deciso niente.
+- **Date**: non scelgono mai il padre. Servono in due casi, entrambi dichiarati:
+  a parita' di punto di diramazione fra due rami, e' figlio quello nato dopo
+  (orario del commit di punta); fra candidati ambigui, l'eta' decide il solo
+  **suggerimento**. Le date non filtrano piu' nessun candidato, quindi la
+  motivazione non contiene piu' uno "scarto dei candidati per data".
 - Dettagli e dimostrazione dei filtri: `src/history.h` e l'intestazione di
   `src/history.c`.
 
@@ -182,9 +214,12 @@ Con `C` commit, `R` riferimenti, `G <= R` famiglie di branch e `L_g` la
 lunghezza della catena dei primi genitori della famiglia `g`:
 
 - indici dei genitori e mappa hash -> indice: `O(C + genitori)`, una volta;
-- appartenenza dei commit e punti di diramazione: `O(S L_g)` (una sola
-  passata sulle catene);
-- matrice di relazioni fra famiglie: `O(S L_g + G^2)`;
+- quante famiglie hanno ogni commit sulla catena (`nchain`) e punto di
+  diramazione di ogni famiglia: `O(S L_g)` (una sola passata sulle catene);
+- matrici per commit: il tronco che possiede il commit, la famiglia che
+  contiene la punta di un'altra, i pari sui punti di diramazione: `O(S L_g)`,
+  con memoria legata al numero di riferimenti (le liste dei pari coprono solo
+  i punti di diramazione e le punte, non tutti i commit condivisi);
 - bitset di raggiungibilita': `O(S |raggiungibili|)`;
 - deduzione dei padri: una sola passata `O(G^2 + S L_g)`;
 - controllo delle relazioni circolari: `O(R)` sui grafi aciclici (mappa
@@ -195,20 +230,25 @@ linearmente con la dimensione del repository, non con il prodotto
 `riferimenti x lunghezza delle catene`. Misure su questa macchina (Release,
 gcc 16.2 MSYS2 UCRT64, `gitgraph_dump` su repository sintetici identici a
 quelli dei test di scala): 22 riferimenti/392 commit 0,29 s, 84/1561 0,28 s,
-266/4035 0,31 s, 363/10.000 0,37 s, 1130/50.000 1,02 s (di cui 0,35 s di
-costruzione del modello).
+266/4035 0,31 s, 363/10.000 1,0 s, 1130/50.000 4,6 s (di cui 2,9 s di
+costruzione del modello: le regole nuove percorrono le catene piu' volte del
+vecchio contatore di proprietari, e le liste dei pari sostituiscono la matrice
+di relazioni `G x G`). I budget dei test sono 3 s, 30 s e 15 s.
 
 ## Test
 
     ctest --test-dir build --output-on-failure
 
-Dieci test, nessuno con finestra:
+Undici test, nessuno con finestra:
 
 1. `make_test_repo` genera il repository di prova (la fixture rimuove prima la
    cartella dei repository di test, dentro la build);
 2. `core` verifica parsing, topologia, modello dei branch, alias, motivazioni
-   (in particolare quando la frase sulla data puo' comparire e quando non deve),
+   (in particolare il padre suggerito e la motivazione che lo dichiara),
    override, long-lived, determinismo, quoting degli argomenti,
+   scelta delle voci del PATH per `git.exe` (vuota, `.`, `..`, relativa, con
+   virgolette, UNC, assoluta: provata sulla funzione, non sulla ricerca, che
+   una volta sola per processo),
    cattura di stdout/stderr senza blocco (pipe riempite oltre la capacità,
    entrambe le pipe attive contemporaneamente, uscita non zero e fallimento
    della creazione dei thread di lettura) e sicurezza della ricerca di git:
@@ -226,11 +266,22 @@ Dieci test, nessuno con finestra:
    né candidati, remoto con punta diversa che mantiene la genealogia dedotta) e
    motivazioni che non cominciano mai con un separatore "; " senza testo prima;
 4. `dump_smoke` esegue lo strumento di dump;
-5. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
+5. `invariance` verifica che la genealogia non dipenda dall'ordine alfabetico:
+   per ogni gruppo di branch con nidificazione o fratelli (nel repository di
+   prova `branch1`/`branch2`, `branch1`/`sp`, `oA`/`oB`/`oC`,
+   `amb1`/`amb2`/`ambbase`, `feature-x`/`rb`/`rm`) costruisce tutte le
+   permutazioni dei nomi (fino a 6 per gruppo) e confronta stato, padre,
+   candidati e padre suggerito **per punta di commit**; costruisce inoltre due
+   repository piccoli nella directory temporanea (nidificazione e tre rami dallo
+   stesso commit, anche con tutti i commit alla stessa ora, come nei repository
+   generati in blocco) e li rimuove alla fine. L'unica cosa che non viene
+   confrontata e' lo spareggio dichiarato sul nome a parita' di date: li' si
+   verifica la base dello spareggio, non la scelta.
+6. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
    3 s;
-6. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
+7. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
    30 s (determinismo verificato anche sul repository grande);
-7. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
+8. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
    15 s, con ogni branch nato dal precedente (catena profonda): verifica il
    controllo delle relazioni circolari e l'ordinamento dei padri.
 
@@ -243,7 +294,10 @@ costruzione del modello, non la generazione.
 
 Il repository di prova contiene: merge `--no-ff`, fast-forward, branch
 cancellato, gruppo di alias (piu' branch sullo stesso commit) e un branch
-figlio ambiguo tra i membri del gruppo, gruppo isolato con date come spareggio
+figlio ambiguo tra i membri del gruppo, gruppo isolato (tre rami dallo stesso
+commit: uno dedotto, uno ambiguo con padre suggerito per data), ramo nato da
+un commit interno di un altro ramo (che resta ambiguo fra i due rami che lo
+contengono),
 riferimenti remoti con punte diverse (`origin/main`, `upstream/main`) piu' uno
 specchio provato e un alias con nome diverso, ramo nato dal **secondo
 genitore** di un merge, merge ripetuti dello stesso branch, storia **ribasata**

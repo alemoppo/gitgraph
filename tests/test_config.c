@@ -887,9 +887,13 @@ static void test_end_to_end(void)
           "branch1: padre dedotto main atteso");
     const BranchNode *b2 = branch_named(&hist, "branch2");
     REQUIRE(b2 != NULL, "branch2 assente");
-    CHECK(b2->state == PARENT_DEDUCED && b2->parent &&
-              strcmp(b2->parent, "branch1") == 0,
-          "branch2: padre dedotto branch1 atteso");
+    /* branch2 e' nato da B2, che sta sulla catena di branch1 e anche su quella
+     * di sp: nessun padre e' dedotto, i candidati sono elencati e il
+     * suggerimento (per data) e' branch1. [parents] dichiara il padre vero. */
+    CHECK(b2->state == PARENT_AMBIGUOUS && b2->parent == NULL &&
+              b2->suggested_parent && strcmp(b2->suggested_parent, "branch1") == 0,
+          "branch2: ambiguo con suggerimento %s",
+          b2->suggested_parent ? b2->suggested_parent : "-");
 
     /* long-lived dichiarato col nome remoto vale come il branch locale */
     history_free(&hist);

@@ -344,21 +344,45 @@ static int test_history_default(const GitData *data)
     CHECK(b1->first_own_commit && b1h &&
               strcmp(b1->first_own_commit, b1h) == 0,
           "branch1: primo commit proprio atteso B1");
-    CHECK(!candidates_contain(b1, "ff"), "branch1: ff non deve essere candidato");
-    /* La frase sulla data compare solo se l'ordinamento per data ha cambiato
-     * davvero il padre scelto. Per branch1 il candidato scartato per data non
-     * avrebbe cambiato nulla (il proprietario del punto di diramazione e' gia'
-     * 'main'), quindi dichiarare uno scarto per data sarebbe fuorviante. */
-    CHECK(b1->motivation && strstr(b1->motivation, "basato sulla data") == NULL,
-          "branch1: nessuno scarto per data atteso, trovato: %s",
-          b1->motivation ? b1->motivation : "-");
+    /* I candidati sono le famiglie che contengono il punto di diramazione e non
+     * sono figlie di branch1: branch2 e sp si sono staccate da branch1, quindi
+     * non possono esserne i padri. Fra i candidati c'e' il tronco main, che
+     * vince: il padre e' deciso, nessun suggerimento. */
+    CHECK(candidates_contain(b1, "main"), "branch1: main deve essere candidato");
+    CHECK(!candidates_contain(b1, "branch2"),
+          "branch1: branch2 e` un figlio, non un candidato padre");
+    CHECK(!candidates_contain(b1, "sp"),
+          "branch1: sp e` un figlio, non un candidato padre");
+    CHECK(b1->suggested_parent == NULL && b1->suggestion_basis == SUGGESTION_NONE,
+          "branch1: padre deciso, quindi nessun suggerimento (%s)",
+          b1->suggested_parent ? b1->suggested_parent : "-");
 
     /* branch2: diramato da B2 lungo branch1 */
     const BranchNode *b2 = branch_named(&hist, "branch2");
     REQUIRE(b2 != NULL, "branch2 assente");
-    CHECK(b2->state == PARENT_DEDUCED && b2->parent &&
-              strcmp(b2->parent, "branch1") == 0,
-          "branch2: padre %s", b2->parent ? b2->parent : "-");
+    /* branch2 e' nato da B2, che sta sulla catena di branch1 e anche su quella
+     * di sp: la struttura non distingue, quindi nessun padre e' dedotto. I
+     * candidati sono elencati e il suggerimento (non un padre) e' il candidato
+     * col primo commit proprio piu' vecchio: B1 (branch1) precede SP1 (sp). */
+    CHECK(b2->state == PARENT_AMBIGUOUS && b2->parent == NULL,
+          "branch2: stato %d con padre %s, atteso ambiguo senza padre",
+          (int)b2->state, b2->parent ? b2->parent : "-");
+    CHECK(candidates_contain(b2, "branch1") && candidates_contain(b2, "sp"),
+          "branch2: candidati attesi branch1 e sp");
+    /* tre nomi, due famiglie: origin/branch1 e' lo specchio di branch1 */
+    CHECK(b2->candidate_count == 3 && candidates_contain(b2, "origin/branch1"),
+          "branch2: candidati attesi branch1, origin/branch1 e sp, trovati %zu",
+          b2->candidate_count);
+    CHECK(b2->suggested_parent && strcmp(b2->suggested_parent, "branch1") == 0,
+          "branch2: padre suggerito %s, atteso branch1",
+          b2->suggested_parent ? b2->suggested_parent : "-");
+    CHECK(b2->suggestion_basis == SUGGESTION_DATE,
+          "branch2: base del suggerimento %d, atteso SUGGESTION_DATE",
+          (int)b2->suggestion_basis);
+    CHECK(b2->motivation && strstr(b2->motivation, "padre suggerito per data") &&
+              strstr(b2->motivation, "poco affidabile con rebase"),
+          "branch2: la motivazione deve dichiarare il suggerimento per data: %s",
+          b2->motivation ? b2->motivation : "-");
     CHECK(b2->fork_hash && b2h && strcmp(b2->fork_hash, b2h) == 0,
           "branch2: fork atteso su B2");
     CHECK(b2->first_own_commit && c1h &&
@@ -419,9 +443,15 @@ static int test_history_default(const GitData *data)
      * spareggio: la frase ci sarebbe solo se l'esito fosse diverso senza. */
     const BranchNode *oc = branch_named(&hist, "oC");
     REQUIRE(oc != NULL, "oC assente");
+    /* oC e' nato da R come oA e come oB. oB e' nato dopo (OB e' piu' recente di
+     * OC) quindi e' suo figlio e non un candidato: resta oA, unico candidato, e
+     * il padre e' dedotto. */
     CHECK(oc->state == PARENT_DEDUCED && oc->parent &&
               strcmp(oc->parent, "oA") == 0,
-          "oC: padre atteso 'oA', trovato %s", oc->parent ? oc->parent : "-");
+          "oC: padre atteso 'oA', trovato %s (stato %d)",
+          oc->parent ? oc->parent : "-", (int)oc->state);
+    CHECK(oc->suggested_parent == NULL && oc->suggestion_basis == SUGGESTION_NONE,
+          "oC: padre deciso, quindi nessun suggerimento");
     CHECK(oc->motivation && strstr(oc->motivation, "basato sulla data") == NULL,
           "oC: nessuno scarto per data atteso (il punto appartiene gia' a oA), "
           "trovato: %s",
@@ -429,11 +459,16 @@ static int test_history_default(const GitData *data)
 
     const BranchNode *ob = branch_named(&hist, "oB");
     REQUIRE(ob != NULL, "oB assente");
-    CHECK(ob->state == PARENT_DEDUCED && ob->parent &&
-              strcmp(ob->parent, "oA") == 0,
-          "oB: padre atteso 'oA', trovato %s", ob->parent ? ob->parent : "-");
-    CHECK(ob->motivation && !strstr(ob->motivation, "basato sulla data"),
-          "oB: nessuno scarto per data atteso");
+    CHECK(ob->state == PARENT_AMBIGUOUS && ob->parent == NULL,
+          "oB: stato %d, atteso ambiguo (stessa base di oC)", (int)ob->state);
+    CHECK(candidates_contain(ob, "oA") && candidates_contain(ob, "oC"),
+          "oB: candidati attesi oA e oC");
+    CHECK(ob->suggested_parent && strcmp(ob->suggested_parent, "oA") == 0,
+          "oB: padre suggerito %s, atteso oA",
+          ob->suggested_parent ? ob->suggested_parent : "-");
+    CHECK(ob->suggestion_basis == SUGGESTION_DATE,
+          "oB: base del suggerimento %d, atteso SUGGESTION_DATE",
+          (int)ob->suggestion_basis);
 
     /* In questo repository l'ordinamento per data non cambia mai il padre
      * scelto (l'unico caso in cui scarta un candidato, oC, ha gia' il
@@ -583,10 +618,10 @@ static int test_overrides(const GitData *data)
             "history_build con override invalido fallita");
     b2 = branch_named(&hist, "branch2");
     REQUIRE(b2 != NULL, "branch2 assente (2)");
-    CHECK(b2->state == PARENT_DEDUCED && b2->parent &&
-              strcmp(b2->parent, "branch1") == 0,
-          "override invalido: branch2 padre %s",
-          b2->parent ? b2->parent : "-");
+    CHECK(b2->state == PARENT_AMBIGUOUS && b2->parent == NULL &&
+              b2->suggested_parent && strcmp(b2->suggested_parent, "branch1") == 0,
+          "override invalido: branch2 resta ambiguo con suggerimento %s",
+          b2->suggested_parent ? b2->suggested_parent : "-");
     history_free(&hist);
 
     /* override incrociati (ciclo): nessun blocco, nodo minore ambiguo */

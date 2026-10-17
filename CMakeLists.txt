@@ -97,6 +97,16 @@ set_tests_properties(core PROPERTIES FIXTURES_REQUIRED testrepo)
 add_test(NAME config COMMAND test_config "${CMAKE_CURRENT_BINARY_DIR}" "${GG_TEST_REPO}")
 set_tests_properties(config PROPERTIES FIXTURES_REQUIRED testrepo)
 
+# Invarianza per rinomina: la genealogia non deve dipendere dall'ordine
+# alfabetico dei nomi. Il test rinomina i riferimenti in memoria (stessi commit,
+# stesse punte) e confronta stato, padre, candidati e padre suggerito per punta
+# di commit. Costruisce inoltre due repository piccoli nella directory
+# temporanea e li rimuove alla fine (controllando il percorso).
+add_executable(test_invariance tests/test_invariance.c)
+target_link_libraries(test_invariance PRIVATE gg_core)
+add_test(NAME invariance COMMAND test_invariance "${CMAKE_CURRENT_BINARY_DIR}" "${GG_TEST_REPO}")
+set_tests_properties(invariance PROPERTIES FIXTURES_REQUIRED testrepo TIMEOUT 600)
+
 add_test(NAME dump_smoke COMMAND gitgraph_dump "${GG_TEST_REPO}")
 set_tests_properties(dump_smoke PROPERTIES FIXTURES_REQUIRED testrepo)
 

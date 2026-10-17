@@ -10,6 +10,11 @@
  *                 non e' un fatto dedotto dalla storia).
  *  - DEDOTTO:     una sola ipotesi plausibile secondo l'euristica.
  *  - AMBIGUO:     piu' ipotesi non distinguibili (incluso il caso di piu'
+ *                 branch sulla stessa punta): non si inventa un padre. Con
+ *                 piu' candidati viene indicato un suggerimento
+ *                 (suggested_parent + suggestion_basis), che il layout puo'
+ *                 mostrare tratteggiato; [parents] in graph.cfg dichiara il
+ *                 padre vero e rende il caso CONFIGURATO.
  *                 branch sulla stessa punta): non si inventa un padre.
  *  - NESSUNO:     nessun branch padre individuabile.
  */
@@ -29,6 +34,14 @@ typedef enum {
     PARENT_AMBIGUOUS,
     PARENT_NONE
 } ParentState;
+
+/* Perche' un padre e' stato solo suggerito fra i candidati (stato ambiguo): il
+ * suggerimento non e' un fatto dedotto, e' un aiuto per il layout. */
+typedef enum {
+    SUGGESTION_NONE,     /* nessun suggerimento (padre deciso o nessun padre) */
+    SUGGESTION_DATE,     /* il candidato col primo commit proprio piu' vecchio */
+    SUGGESTION_NAME_TIE  /* a parita' di date: il nome (spareggio dichiarato) */
+} SuggestionBasis;
 
 typedef struct {
     char *name;          /* nome breve del branch ("main", "origin/main") */
@@ -69,6 +82,12 @@ typedef struct {
 
     char **candidates;    /* candidati (ordinati), solo informativo */
     size_t candidate_count;
+
+    /* Padre suggerito: valido solo con stato AMBIGUO e piu' candidati. Non e'
+     * un padre dedotto ne' certo: serve a piazzare il branch (tratteggiato)
+     * finche' [parents] non dichiara il padre vero. */
+    char *suggested_parent;
+    SuggestionBasis suggestion_basis;
 } BranchNode;
 
 typedef struct {

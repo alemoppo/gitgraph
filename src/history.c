@@ -69,15 +69,6 @@
 
 #define NO_POS ((size_t)-1)
 
-/* Relazioni precalcolate, valutate sulla catena di g: rel[g*G + b].
- * "f(b)" e "tip(b)" sono il punto di diramazione e la punta della famiglia b. */
-enum {
-    REL_F_ON_CHAIN = 1,   /* f(b) giace sulla catena di g */
-    REL_TIP_ON_CHAIN = 2, /* la punta di b giace sulla catena di g */
-    REL_F_BELOW = 4,      /* f(b) sotto f(g) sulla catena di g (piu' vecchio) */
-    REL_F_ABOVE = 8       /* f(b) sopra f(g) sulla catena di g (piu' recente) */
-};
-
 typedef struct {
     size_t *nodes;       /* riferimenti con la stessa punta */
     size_t node_count;
@@ -87,10 +78,11 @@ typedef struct {
     int ll_rank;         /* rank minimo dei membri long-lived, -1 se nessuno */
     bool trunk;           /* il rappresentante e' long-lived: famiglia di tronco */
     size_t f;            /* punto di diramazione, NO_POS se assente */
+    size_t fork_dec;     /* punto di diramazione usato per la scelta del padre */
     size_t first_own;    /* primo commit proprio, NO_POS se assente */
-    bool date_used;      /* un candidato e' stato scartato per data */
     size_t *cand;        /* indici famiglia candidati */
     size_t cand_count;
+    BitSet *inside;      /* famiglie la cui catena contiene la sua punta */
     BitSet *reach;       /* commit raggiungibili dalla punta */
 } Family;
 
@@ -102,11 +94,18 @@ typedef struct {
     size_t family_count;
     size_t *node_family;    /* nodo -> famiglia */
     size_t *family_order;   /* famiglie in ordine deterministico */
-    size_t *owner;          /* commit -> famiglia che lo rivendica */
-    uint8_t *rel;           /* matrice G*G delle relazioni */
-    size_t *scratch_pos;    /* posizione sulla catena corrente */
-    uint32_t *scratch_gen;  /* generazione della catena corrente */
-    uint32_t gen;
+    size_t *nchain;         /* commit -> quante famiglie lo hanno in catena */
+    size_t *list_start;     /* commit -> inizio in list_items */
+    size_t *list_count;     /* commit -> quante famiglie lo hanno in catena */
+    size_t *list_fill;      /* uso interno durante il riempimento */
+    size_t *list_items;     /* famiglie per commit, blocchi contigui */
+    size_t *fork_head;      /* commit -> prima famiglia che si stacca li' */
+    size_t *tip_at;         /* commit -> famiglia la cui punta e' questo commit */
+    size_t *trunk_at;       /* commit -> tronco che lo possiede (NO_POS se nessuno) */
+    uint32_t *mark_gen;     /* generazione del marchio sulla catena corrente */
+    uint32_t mark;
+    size_t *fork_next;      /* famiglia -> successiva con lo stesso fork */
+
     size_t *stack;          /* buffer riutilizzato per i DFS e i cammini */
     StrMap *name_map;       /* nome nodo -> (indice nodo + 1) */
 } Ctx;
@@ -196,6 +195,15 @@ static void set_parent(BranchNode *n, const char *parent, ParentState st,
     n->genealogy_undetermined = false;
 }
 
+/* Padre suggerito fra i candidati (stato ambiguo): niente padre dedotto, solo
+ * un'indicazione con la sua base, cosi' il layout puo' tratteggiarla. */
+static void set_suggestion(BranchNode *n, const char *suggested, SuggestionBasis basis)
+{
+    free(n->suggested_parent);
+    n->suggested_parent = suggested ? xstrdup(suggested) : NULL;
+    n->suggestion_basis = basis;
+}
+
 static void set_fork(BranchNode *n, const Ctx *ctx, size_t fork_idx)
 {
     free(n->fork_hash);
@@ -245,6 +253,7 @@ static void family_free(Family *f)
 {
     free(f->nodes);
     free(f->cand);
+    bitset_free(f->inside);
     bitset_free(f->reach);
 }
 
@@ -355,6 +364,7 @@ static void build_families(Ctx *ctx)
         fam->ll_rank = rep->long_lived_rank;
         fam->trunk = rep->is_long_lived;
         fam->f = NO_POS;
+        fam->fork_dec = NO_POS;
         fam->first_own = NO_POS;
     }
 }
@@ -377,88 +387,74 @@ static void build_family_order(Ctx *ctx)
 
 /* ---------- precalcoli sulle catene dei primi genitori ---------- */
 
-static void chain_fill(Ctx *ctx, size_t fi);
-static bool chain_has(const Ctx *ctx, size_t commit_idx);
-
-/* Punti di diramazione e regioni proprie.
+/* Punti di diramazione, regioni proprie e parenti: tutto dalla sola struttura.
  *
- * Regole, indipendenti dall'ordine di visita:
- *  - un tronco (long-lived) non puo' essere una diramazione di un altro ramo:
- *    risalendo la sua catena non si ferma mai sulla punta di un'altra
- *    famiglia, e rivendica tutto cio' che incontra libero;
- *  - ogni altro branch che risale e trova la punta di un'altra famiglia si e'
- *    diramato li': quel commit e' il suo punto di diramazione e resta di chi
- *    lo aveva raggiunto prima;
- *  - un commit non ancora rivendicato diventa proprio di chi lo incontra; un
- *    commit gia' rivendicato da un'altra famiglia e' il punto di diramazione;
- *  - una famiglia che non rivendica nulla (fast-forward, specchio lontano,
- *    alias) non ha nemmeno una base: fork assente, resta da stabilire a chi
- *    appartiene con il fallback sui contenitori.
- * L'ordine conta solo per i tronchi, che sono sempre visitati per primi
- * (long-lived prima, poi nome): e' cio' che rende deterministico il resto. */
-static void compute_ownership_and_forks(Ctx *ctx)
+ * Nessuna regola dipende dall'ordine di visita delle famiglie: i nomi non
+ * decidono niente (l'unico ordinamento rimasto, quello dei tronchi, e' quello
+ * esplicito di [long-lived] in graph.cfg).
+ *
+ * - nchain[c]: quante famiglie hanno il commit c sulla catena dei primi
+ *   genitori. Un commit su due o piu' catene non-tronco, senza un tronco che
+ *   lo contenga, e' condiviso: non ha un proprietario.
+ * - f(b): per una famiglia non-tronco, il primo commit scendendo dalla catena
+ *   di b che e' condiviso oppure che e' la punta di un'altra famiglia (D1, D2,
+ *   D6 della vecchia euristica valgono ancora, ma valgono per definizione e non
+ *   per il confronto con chi e' passato prima). I tronchi non hanno un punto di
+ *   diramazione: sono la base.
+ * - first_own(b): il primo commit proprio di b, cioe' il primo scendendo che
+ *   nessun'altra famiglia raggiunge; se la famiglia non ha commit proprio
+ *   (fast-forward, specchio lontano, alias) non ha nemmeno una base: fork
+ *   assente, resta il fallback sui contenitori.
+ * - figli: X e' figlio di b se f(X) sta sulla catena di b e X e' piu' recente
+ *   di b. E' la relazione che evita di scambiare un ramo con il proprio figlio
+ *   e risolve il caso dei due rami nati dallo stesso commit (il piu' vecchio
+ *   dei due e' il padre dell'altro).
+ *
+ * Il resto (quali famiglie stanno su un commit, quindi i candidati) e' costruito
+ * con due passate sulle catene: la prima conta, la seconda riempisce.
+ */
+static void compute_forks(Ctx *ctx)
 {
     size_t n = ctx->d->commit_count;
     size_t g = ctx->family_count;
-    ctx->owner = xmalloc((n ? n : 1) * sizeof(size_t));
-    for (size_t i = 0; i < n; i++)
-        ctx->owner[i] = NO_POS;
+    ctx->nchain = xcalloc(n ? n : 1, sizeof(size_t));
 
-    /* famiglia che possiede ciascuna punta (le famiglie sono per punta, quindi
-     * il proprietario e' unico) */
-    size_t *tip_owner = xmalloc((n ? n : 1) * sizeof(size_t));
-    for (size_t i = 0; i < n; i++)
-        tip_owner[i] = NO_POS;
+    /* 1. quante famiglie raggiungono ogni commit */
     for (size_t fi = 0; fi < g; fi++) {
-        if (ctx->families[fi].tip_idx != NO_POS)
-            tip_owner[ctx->families[fi].tip_idx] = fi;
+        for (size_t cur = ctx->families[fi].tip_idx; cur != NO_POS; cur = first_parent(ctx, cur))
+            ctx->nchain[cur]++;
     }
 
+    /* 1b. il tronco che possiede ciascun commit: un long-lived possiede tutto
+     * quello che incontra, senza condizioni, e fra due tronchi vale il primo
+     * nell'ordine della configurazione (quello esplicito in graph.cfg) */
+    ctx->trunk_at = xmalloc((n ? n : 1) * sizeof(size_t));
+    for (size_t i = 0; i < n; i++)
+        ctx->trunk_at[i] = NO_POS;
     for (size_t oi = 0; oi < g; oi++) {
         size_t fi = ctx->family_order[oi];
-        Family *fam = &ctx->families[fi];
-        if (fam->tip_idx == NO_POS)
+        if (!ctx->families[fi].trunk)
             continue;
-        size_t cur = fam->tip_idx;
-        size_t own = NO_POS;
-        size_t f = NO_POS;
-        while (cur != NO_POS) {
-            size_t tip_g = tip_owner[cur];
-            if (!fam->trunk && tip_g != NO_POS && tip_g != fi) {
-                f = cur; /* biforcazione dalla punta di un altro ramo */
-                break;
-            }
-            if (ctx->owner[cur] == NO_POS) {
-                ctx->owner[cur] = fi;
-                own = cur;
-            } else if (ctx->owner[cur] != fi) {
-                f = cur;
-                break;
-            }
-            cur = first_parent(ctx, cur);
+        for (size_t cur = ctx->families[fi].tip_idx; cur != NO_POS; cur = first_parent(ctx, cur)) {
+            if (ctx->trunk_at[cur] == NO_POS)
+                ctx->trunk_at[cur] = fi;
         }
-        fam->f = (own == NO_POS) ? NO_POS : f; /* senza commit propri: niente base */
-        fam->first_own = own;
     }
-    free(tip_owner);
-}
 
-/* Riempie lo scratch con le posizioni (0 = punta) sulla catena della famiglia. */
-static void chain_fill(Ctx *ctx, size_t fi)
-{
-    ctx->gen++;
-    size_t pos = 0;
-    size_t cur = ctx->families[fi].tip_idx;
-    while (cur != NO_POS) {
-        ctx->scratch_gen[cur] = ctx->gen;
-        ctx->scratch_pos[cur] = pos++;
-        cur = first_parent(ctx, cur);
+    /* 2. punto di diramazione e primo commit proprio */
+    for (size_t fi = 0; fi < g; fi++) {
+        Family *fam = &ctx->families[fi];
+        fam->f = NO_POS;
+        fam->first_own = NO_POS;
+        if (fam->tip_idx == NO_POS || fam->trunk)
+            continue; /* un tronco e' la base: niente padre da dedurre */
+        for (size_t cur = fam->tip_idx; cur != NO_POS; cur = first_parent(ctx, cur)) {
+            if (ctx->nchain[cur] >= 2) {
+                fam->f = cur;
+                break;
+            }
+        }
     }
-}
-
-static bool chain_has(const Ctx *ctx, size_t commit_idx)
-{
-    return commit_idx != NO_POS && ctx->scratch_gen[commit_idx] == ctx->gen;
 }
 
 /* Raggiungibilita' (qualsiasi catena) della punta di una famiglia. */
@@ -482,167 +478,347 @@ static void reach_build(Ctx *ctx, size_t fi, BitSet *set)
         }
     }
 }
-
-/* Matrice delle relazioni: per ogni catena (riga g) e ogni famiglia b, dove
- * stanno f(b) e la punta di b rispetto alla catena di g. */
-static void build_rel(Ctx *ctx)
+/* Famiglie che si staccano da ciascun commit (liste corte: una famiglia ha un
+ * solo punto di diramazione, quindi ogni lista ha al massimo G elementi). */
+static void build_fork_index(Ctx *ctx)
 {
+    size_t n = ctx->d->commit_count;
     size_t g = ctx->family_count;
-    ctx->rel = xcalloc((g ? g * g : 1), 1);
-    for (size_t gi = 0; gi < g; gi++) {
-        chain_fill(ctx, gi);
-        Family *gf = &ctx->families[gi];
-        size_t pos_fg = NO_POS;
-        if (gf->f != NO_POS && chain_has(ctx, gf->f))
-            pos_fg = ctx->scratch_pos[gf->f];
-        uint8_t *row = &ctx->rel[gi * g];
-        for (size_t bi = 0; bi < g; bi++) {
-            Family *b = &ctx->families[bi];
-            uint8_t m = 0;
-            if (chain_has(ctx, b->f)) {
-                m |= REL_F_ON_CHAIN;
-                if (pos_fg != NO_POS) {
-                    size_t p = ctx->scratch_pos[b->f];
-                    if (p > pos_fg)
-                        m |= REL_F_BELOW;
-                    else if (p < pos_fg)
-                        m |= REL_F_ABOVE;
-                }
-            }
-            if (chain_has(ctx, b->tip_idx))
-                m |= REL_TIP_ON_CHAIN;
-            row[bi] = m;
+    ctx->fork_head = xmalloc((n ? n : 1) * sizeof(size_t));
+    ctx->fork_next = xmalloc((g ? g : 1) * sizeof(size_t));
+    for (size_t i = 0; i < n; i++)
+        ctx->fork_head[i] = NO_POS;
+    for (size_t fi = 0; fi < g; fi++) {
+        size_t f = ctx->families[fi].f;
+        ctx->fork_next[fi] = NO_POS;
+        if (f == NO_POS)
+            continue;
+        ctx->fork_next[fi] = ctx->fork_head[f];
+        ctx->fork_head[f] = fi;
+    }
+}
+
+/* Famiglie presenti su ciascun commit condiviso: blocchi contigui, in ordine di
+ * famiglia. Il totale e' la somma delle condivisioni, cioe' quanto history ha
+ * gia' percorso le catene: nessun costo quadratico in piu' rispetto ai
+ * riferimenti. */
+/* Famiglie presenti sui commit che possono essere un punto di diramazione: i
+ * punti di diramazione delle famiglie e le punte delle famiglie. Gli altri
+ * commit condivisi stanno dentro un ramo comune (li' non si stacca nessuno e non
+ * finisce nessuna punta: e' il caso di un commit su un tronco, che basta da solo
+ * a decidere) e non viene osservato.
+ *
+ * Restringere le liste a questi commit tiene il memoria legato al numero di
+ * riferimenti e non alla lunghezza delle catene: su un repository grande i troni
+ * condividono decine di migliaia di commit e le liste diventerebbero enormi.
+ * Il risultato sono blocchi contigui, in ordine di famiglia. */
+static void build_peer_index(Ctx *ctx)
+{
+    size_t n = ctx->d->commit_count;
+    size_t g = ctx->family_count;
+    uint8_t *interesting = xcalloc(n ? n : 1, 1);
+    for (size_t fi = 0; fi < g; fi++) {
+        if (ctx->families[fi].f != NO_POS)
+            interesting[ctx->families[fi].f] = 1;
+        if (ctx->families[fi].tip_idx != NO_POS)
+            interesting[ctx->families[fi].tip_idx] = 1;
+    }
+    ctx->list_start = xmalloc((n ? n : 1) * sizeof(size_t));
+    ctx->list_count = xmalloc((n ? n : 1) * sizeof(size_t));
+    ctx->list_fill = xmalloc((n ? n : 1) * sizeof(size_t));
+    for (size_t i = 0; i < n; i++)
+        ctx->list_count[i] = 0;
+
+    for (size_t fi = 0; fi < g; fi++) {
+        for (size_t cur = ctx->families[fi].tip_idx; cur != NO_POS; cur = first_parent(ctx, cur)) {
+            if (interesting[cur])
+                ctx->list_count[cur]++;
+        }
+    }
+    size_t total = 0;
+    for (size_t i = 0; i < n; i++) {
+        ctx->list_start[i] = total;
+        ctx->list_fill[i] = total;
+        total += ctx->list_count[i];
+    }
+    ctx->list_items = xmalloc((total ? total : 1) * sizeof(size_t));
+    for (size_t fi = 0; fi < g; fi++) {
+        for (size_t cur = ctx->families[fi].tip_idx; cur != NO_POS; cur = first_parent(ctx, cur)) {
+            if (!interesting[cur])
+                continue;
+            ctx->list_items[ctx->list_fill[cur]++] = fi;
+        }
+    }
+    free(interesting);
+}
+
+/* Commite su cui vale la pena fermarsi: il punto di diramazione di qualcuno o la
+ * punta di una famiglia. */
+static bool commit_is_interesting(const Ctx *ctx, size_t commit)
+{
+    return ctx->fork_head[commit] != NO_POS || ctx->tip_at[commit] != NO_POS;
+}
+/* Famiglie la cui catena contiene il commit: blocchi contigui costruiti da
+ * build_peer_index, in ordine di famiglia (le famiglie hanno un indice stabile,
+ * i nomi non c'entrano). */
+static size_t peers_at(const Ctx *ctx, size_t commit)
+{
+    if (commit == NO_POS || commit >= ctx->d->commit_count)
+        return 0;
+    return ctx->list_count[commit];
+}
+
+static const size_t *peers_at_list(const Ctx *ctx, size_t commit)
+{
+    return &ctx->list_items[ctx->list_start[commit]];
+}
+/* Famiglie la cui catena contiene la punta di b: stanno dentro b (discendenti
+ * o continuazioni), quindi non possono essere il padre di b. I tronchi non
+ * contano: un tronco e' la base e non continua nessuno, quindi i commit che
+ * condivide con b restano del tronco.
+ *
+ * Si calcola con una sola passata sulle catene: mentre si percorre la catena di X
+ * si nota ogni punta incontrata e X viene messo fra le famiglie che contiene. */
+static void compute_inside(Ctx *ctx)
+{
+    size_t n = ctx->d->commit_count;
+    size_t g = ctx->family_count;
+    ctx->tip_at = xmalloc((n ? n : 1) * sizeof(size_t));
+    for (size_t i = 0; i < n; i++)
+        ctx->tip_at[i] = NO_POS;
+    for (size_t fi = 0; fi < g; fi++) {
+        size_t tip = ctx->families[fi].tip_idx;
+        if (tip != NO_POS)
+            ctx->tip_at[tip] = fi;
+    }
+    /* marchi delle catene: una generazione per famiglia, cosi' si puo' chiedere
+     * "un commit e' su questa catena?" in tempo costante */
+    ctx->mark_gen = xcalloc(n ? n : 1, sizeof(uint32_t));
+    ctx->mark = 0;
+    for (size_t fi = 0; fi < g; fi++)
+        ctx->families[fi].inside = bitset_new(g ? g : 1);
+
+    for (size_t xi = 0; xi < g; xi++) {
+        const Family *x = &ctx->families[xi];
+        if (x->tip_idx == NO_POS || x->trunk)
+            continue;
+        for (size_t cur = x->tip_idx; cur != NO_POS; cur = first_parent(ctx, cur)) {
+            size_t tipf = ctx->tip_at[cur];
+            if (tipf == NO_POS || tipf == xi)
+                continue;
+            bitset_set(ctx->families[tipf].inside, xi);
         }
     }
 }
 
-/* ---------- candidati ---------- */
-
-/* Calcola i candidati di una famiglia. Con use_date false la regola D5 (fork
- * uguali, spareggio sulla data) non viene applicata: serve a confrontare il
- * risultato con e senza data. La lista dei candidati e' libera: chi chiama deve
- * liberarla.
- */
-static void collect_candidates(const Ctx *ctx, size_t bi, bool use_date,
-                               size_t **cand_out, size_t *cand_count_out,
-                               bool *date_used_out)
+static bool family_is_inside(const Ctx *ctx, size_t b, size_t x)
 {
-    const Family *b = &ctx->families[bi];
-    size_t g = ctx->family_count;
-    size_t *cand = NULL;
-    size_t n = 0;
-    bool date_used = false;
-    if (b->tip_idx == NO_POS || b->f == NO_POS || b->trunk) {
-        *cand_out = cand;
-        *cand_count_out = n;
-        *date_used_out = date_used;
-        return;
+    const BitSet *set = ctx->families[b].inside;
+    return set && bitset_test(set, x);
+}
+
+/* Marchia la catena della famiglia b: serve a chiedere in tempo costante se un
+ * commit (per esempio il punto di diramazione di un'altra famiglia) sta su
+ * questa catena. */
+static void mark_chain(Ctx *ctx, size_t b)
+{
+    ctx->mark++;
+    for (size_t cur = ctx->families[b].tip_idx; cur != NO_POS; cur = first_parent(ctx, cur))
+        ctx->mark_gen[cur] = ctx->mark;
+}
+
+/* X e' un figlio di b (nel punto c): si stacca dalla catena di b, quindi sta
+ * sotto e non puo' esserne il padre. Si riconosce dalla sola struttura e dagli
+ * orari dei commit (dati di Git), mai dai nomi:
+ *  - f(X) sta sulla catena di b ed e' piu' in alto di c: X e' nato dentro il
+ *    ramo di b, sopra il punto in cui i due si incontrano (sulla stessa catena
+ *    l'ordine delle posizioni nel log e' quello degli antenati);
+ *  - f(X) == c e b continua in X (la catena di X passa per la punta di b): X
+ *    e' il figlio, senza guardare le date;
+ *  - f(X) == c e X ha integrato b con un merge (b sta nella storia di X ma non
+ *    sulla sua catena dei primi genitori): X e' il padre, non un figlio;
+ *  - f(X) == c e nessuno dei due contiene l'altro: i due rami sono fratelli,
+ *    nati dallo stesso punto. Vince l'ordine di nascita: prima l'orario dei
+ *    commit di punta (dato di Git); a parita' d'orario, come nei repository
+ *    generati in blocco dove ogni commit ha lo stesso timestamp, la posizione
+ *    nel log, dove i discendenti precedono gli antenati. Anche questa e' una
+ *    posizione di Git, non un nome: ecco perche' permutare i nomi non cambia
+ *    nulla (lo verifica il test di invarianza). Resta comunque un fatto, non
+ *    una prova: se la struttura non piacesse, [parents] la dichiara.
+ *
+ * `mark` e' la generazione con cui e' stata marchiata la catena di b. */
+static bool is_child_at(const Ctx *ctx, size_t b, size_t c, size_t x, uint32_t mark)
+{
+    const Family *xf = &ctx->families[x];
+    const Family *bf = &ctx->families[b];
+    if (xf->f == NO_POS || bf->tip_idx == NO_POS || xf->tip_idx == NO_POS)
+        return false;
+    if (ctx->mark_gen[xf->f] != mark)
+        return false; /* f(X) non e' sulla catena di b */
+    if (xf->f < c)
+        return true; /* nato piu' in alto: dentro il ramo di b */
+    if (xf->f == c) {
+        if (family_is_inside(ctx, b, x))
+            return true; /* b continua in X: X e' il figlio */
+        if (bitset_test(xf->reach, bf->tip_idx))
+            return false; /* X ha integrato b con un merge: X e' il padre */
+        int64_t dx = date_at(ctx, xf->tip_idx);
+        int64_t db = date_at(ctx, bf->tip_idx);
+        if (dx != db)
+            return dx > db; /* fratelli: nato dopo e' il figlio */
+        return xf->tip_idx < bf->tip_idx; /* stessi orari: ordine di nascita */
     }
-    const uint8_t *rel_b = &ctx->rel[bi * g];
-    for (size_t xi = 0; xi < g; xi++) {
-        if (xi == bi)
+    return false;
+}
+/* X e' un plausibile padre di b al punto c se non e' b stesso, non sta dentro b
+ * e non e' un figlio di b.
+ *
+ * Il solo fatto che X contenga i commit di b non esclude nulla: un merge porta
+ * i commit di b dentro X (per esempio main dopo un merge di branch1), e main
+ * resta il padre di b. */
+static bool peer_is_parent(const Ctx *ctx, size_t b, size_t c, size_t x, uint32_t mark)
+{
+    if (x == b)
+        return false;
+    if (family_is_inside(ctx, b, x))
+        return false;
+    if (is_child_at(ctx, b, c, x, mark))
+        return false;
+    return true;
+}
+
+/* Primo commit proprio di ciascuna famiglia: il piu' vecchio della sua regione
+ * propria, cioe' quello subito sopra il punto di diramazione (serve per ordinare
+ * i figli nel layout e per il suggerimento fra candidati).
+ *
+ * Un commit e' proprio se nessun'altra famiglia lo raggiunge, oppure se le
+ * famiglie che lo raggiungono stanno dentro b (figli e discendenti: b esiste
+ * perche' qualcuno e' partito da li'). Senza commit proprio non c'e' una base:
+ * la famiglia e' dentro un'altra (fast-forward, specchio lontano, alias) e non ha
+ * un punto da cui sia partito qualcuno, quindi neppure un punto di diramazione. */
+static void compute_first_own(Ctx *ctx)
+{
+    size_t g = ctx->family_count;
+    for (size_t fi = 0; fi < g; fi++) {
+        Family *fam = &ctx->families[fi];
+        fam->first_own = NO_POS;
+        if (fam->tip_idx == NO_POS || fam->trunk)
             continue;
-        const Family *beta = &ctx->families[xi];
-        if (beta->tip_idx == NO_POS)
-            continue;
-        uint8_t rb = ctx->rel[xi * g + bi]; /* f(b), tip(b) vs catena di beta */
-        if (rb & REL_TIP_ON_CHAIN)
-            continue; /* D1: beta discende da b */
-        if (rel_b[xi] & REL_F_ABOVE)
-            continue; /* D2: beta si e' diramato da un commit interno di b */
-        if (!(rb & REL_F_ON_CHAIN))
-            continue; /* D6: beta non contiene il punto di diramazione */
-        if (!beta->trunk) {
-            if (beta->first_own != NO_POS) {
-                if (rb & REL_F_BELOW)
-                    continue; /* D3: beta non esisteva a f(b) */
-            } else if (beta->tip_idx != b->f) {
-                continue; /* D4: beta assorbito (FF/alias), non fa da padre */
-            }
-            /* D5: fork uguali, decisione per data (spareggio dichiarato) */
-            if (use_date && beta->f == b->f && beta->first_own != NO_POS &&
-                b->first_own != NO_POS &&
-                date_at(ctx, beta->first_own) > date_at(ctx, b->first_own)) {
-                date_used = true;
+        mark_chain(ctx, fi);
+        uint32_t mark = ctx->mark;
+        size_t own = NO_POS;
+        for (size_t cur = fam->tip_idx; cur != NO_POS; cur = first_parent(ctx, cur)) {
+            if (ctx->nchain[cur] == 1) {
+                own = cur;
                 continue;
             }
+            if (ctx->trunk_at[cur] != NO_POS)
+                break; /* un tronco possiede questo commit: la regione finisce */
+            if (!commit_is_interesting(ctx, cur)) {
+                own = cur; /* ramo comune: nessuno si stacca qui, resta proprio */
+                continue;
+            }
+            const size_t *peers = peers_at_list(ctx, cur);
+            size_t count = peers_at(ctx, cur);
+            bool proprio = true;
+            for (size_t k = 0; k < count && proprio; k++)
+                if (peer_is_parent(ctx, fi, cur, peers[k], mark))
+                    proprio = false;
+            if (!proprio)
+                break; /* qui la famiglia entra nella storia di un altro ramo */
+            own = cur;
         }
-        cand = xrealloc(cand, (n + 1) * sizeof(size_t));
-        cand[n++] = xi;
+        fam->first_own = own;
+        if (fam->first_own == NO_POS)
+            fam->f = NO_POS;
     }
-    *cand_out = cand;
-    *cand_count_out = n;
-    *date_used_out = date_used;
+}
+/* ---------- candidati ---------- */
+
+/* Scende la catena di b e si ferma al primo commit dove un'altra famiglia e' un
+ * plausibile padre: quello e' il punto di diramazione che vale e i candidati sono
+ * le famiglie presenti su quel commit. Se sul primo punto condiviso non resta
+ * nessun plausibile padre (per esempio b e' una continuazione di X: la
+ * condivisione e' con un ramo che si e' staccato da b) la discesa continua.
+ *
+ * Scrive il punto scelto in fam->fork_dec (NO_POS se nessuno) e i candidati in
+ * fam->cand; la lista e' libera e va liberata da chi chiama. */
+static void collect_candidates(Ctx *ctx, size_t bi)
+{
+    Family *b = &ctx->families[bi];
+    free(b->cand);
+    b->cand = NULL;
+    b->cand_count = 0;
+    b->fork_dec = NO_POS;
+    if (b->tip_idx == NO_POS || b->trunk)
+        return;
+    /* senza commit proprio non c'e' una base da cui sia partito qualcosa: la
+     * famiglia e' dentro un'altra (fast-forward, specchio lontano, alias) e il
+     * fallback sui contenitori risponde meglio di un punto di diramazione */
+    if (b->first_own == NO_POS)
+        return;
+
+    /* la punta di b non e' mai il suo punto di diramazione: b non e' nato da
+     * se stesso (e la punta e' per definizione sua) */
+    mark_chain(ctx, bi);
+    for (size_t cur = first_parent(ctx, b->tip_idx); cur != NO_POS;
+         cur = first_parent(ctx, cur)) {
+        if (ctx->trunk_at[cur] != NO_POS) {
+            /* un tronco possiede questo commit: e' il padre, non c'e' da
+             * confrontare nessun altro (un long-lived non si deduce) */
+            b->fork_dec = cur;
+            b->cand = xmalloc(sizeof(size_t));
+            b->cand[0] = ctx->trunk_at[cur];
+            b->cand_count = 1;
+            return;
+        }
+        if (peers_at(ctx, cur) < 2)
+            continue;
+        const size_t *peers = peers_at_list(ctx, cur);
+        size_t count = peers_at(ctx, cur);
+        size_t *vivi = xmalloc((count ? count : 1) * sizeof(size_t));
+        size_t n = 0;
+        for (size_t k = 0; k < count; k++)
+            if (peer_is_parent(ctx, bi, cur, peers[k], ctx->mark))
+                vivi[n++] = peers[k];
+        if (n == 0) {
+            free(vivi);
+            continue;
+        }
+        b->fork_dec = cur;
+        b->cand = vivi;
+        b->cand_count = n;
+        return;
+    }
 }
 
-/* Una passata sui candidati: l'ordine di visita non conta (i candidati sono
- * determinati dalla struttura, non da chi viene prima), ma si tiene
- * esplicito perche' il risultato sia riproducibile. */
 static void run_pass(Ctx *ctx)
 {
-    size_t g = ctx->family_count;
-    for (size_t oi = 0; oi < g; oi++) {
-        size_t bi = ctx->family_order[oi];
-        Family *b = &ctx->families[bi];
-        free(b->cand);
-        b->cand = NULL;
-        b->cand_count = 0;
-        b->date_used = false;
-        collect_candidates(ctx, bi, true, &b->cand, &b->cand_count, &b->date_used);
-    }
+    for (size_t fi = 0; fi < ctx->family_count; fi++)
+        collect_candidates(ctx, fi);
 }
 
-/* ---------- nomi ---------- */
-
-/* Sceglie il candidato padre fra quelli indicati: il candidato che possiede il
- * punto di diramazione (il commit e' nella sua regione propria) e' il padre
- * naturale; se nessuno lo possiede, l'unico candidato; altrimenti l'unico a
- * monte di tutti; altrimenti nessuno (ambiguo). Restituisce l'indice della
- * famiglia scelta, scrive in *by_owner se e' stata la regola del proprietario e
- * in *count quanti candidati soddisfano la regola applicata. */
-static size_t select_parent_family(const Ctx *ctx, const Family *b,
-                                   const size_t *cand, size_t cand_count,
-                                   bool *by_owner, size_t *count_out)
+/* Il tronco e' il padre quando e' presente fra i candidati: un long-lived non
+ * si deduce, e' dichiarato. */
+static size_t trunk_among(const Ctx *ctx, const Family *b)
 {
-    size_t chosen = NO_POS;
-    size_t count = 0;
-    *by_owner = false;
-
-    if (b->f != NO_POS && ctx->owner[b->f] != NO_POS) {
-        for (size_t i = 0; i < cand_count; i++) {
-            if (cand[i] == ctx->owner[b->f]) {
-                chosen = cand[i];
-                count++;
-            }
-        }
-        *by_owner = (count == 1);
-    }
-    if (!*by_owner && cand_count == 1) {
-        chosen = cand[0];
-        count = 1;
-    }
-    if (!*by_owner && count != 1 && cand_count > 1) {
-        count = 0;
-        for (size_t i = 0; i < cand_count; i++) {
-            const Family *c = &ctx->families[cand[i]];
-            bool ok = true;
-            for (size_t j = 0; j < cand_count && ok; j++) {
-                if (i == j)
-                    continue;
-                const Family *o = &ctx->families[cand[j]];
-                if (!bitset_test(o->reach, c->tip_idx))
-                    ok = false;
-            }
-            if (ok) {
-                chosen = cand[i];
-                count++;
-            }
-        }
-    }
-    *count_out = count;
-    return chosen;
+    for (size_t k = 0; k < b->cand_count; k++)
+        if (ctx->families[b->cand[k]].trunk)
+            return b->cand[k];
+    return NO_POS;
 }
 
+/* Punto di diramazione deciso dalla struttura: se il commit e' la punta di
+ * un'altra famiglia, quella famiglia e' il padre. */
+static size_t tip_family_at(const Ctx *ctx, size_t commit)
+{
+    if (commit == NO_POS)
+        return NO_POS;
+    for (size_t k = 0; k < ctx->family_count; k++)
+        if (ctx->families[k].tip_idx == commit)
+            return k;
+    return NO_POS;
+}
 /* Nomi dei riferimenti delle famiglie indicate, nell'ordine deterministico
  * delle famiglie (long-lived prima, poi nome del rappresentante); dentro una
  * famiglia compaiono tutti i riferimenti, perche' sono la stessa genealogia e
@@ -738,6 +914,8 @@ typedef struct {
     ParentState state;
     char *parent;       /* da liberare dopo l'applicazione */
     char *motivation;   /* idem */
+    char *suggested;    /* padre suggerito fra i candidati (solo se ambiguo) */
+    SuggestionBasis basis; /* perche' e' stato suggerito */
     size_t fork_idx;
     size_t first_own_idx;
 } Deduction;
@@ -763,16 +941,17 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
     char sh[16];
     StrBuf mot;
     sb_init(&mot);
-    /* la menzione della data si puo' rivelare non necessaria piu' in fondo */
-    bool menziona_data = b->date_used;
 
     if (b->tip_idx == NO_POS) {
         sb_append(&mot, "nessun commit raggiungibile da questo riferimento");
     } else {
-        d->fork_idx = b->f;
+        /* il punto di diramazione che vale e' quello dove la scelta e' stata
+         * fatta: se sul primo punto condiviso non restava un plausibile padre
+         * la discesa e' continuata (fork_dec) */
+        d->fork_idx = b->fork_dec;
         d->first_own_idx = b->first_own;
-        if (b->f != NO_POS)
-            gitdata_short_hash(commit_at(ctx, b->f)->hash, 8, sh);
+        if (b->fork_dec != NO_POS)
+            gitdata_short_hash(commit_at(ctx, b->fork_dec)->hash, 8, sh);
         else
             sh[0] = '\0';
 
@@ -791,7 +970,7 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
             }
             if (nh == 0) {
                 d->state = PARENT_NONE;
-                if (b->f != NO_POS)
+                if (b->fork_dec != NO_POS)
                     sb_appendf(&mot,
                                "genealogia non determinabile: nessun branch piu' antico "
                                "del punto di diramazione %s",
@@ -813,7 +992,7 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                         pick = holders[i];
                 }
                 const Family *h = &ctx->families[pick];
-                d->fork_idx = b->f;
+                d->fork_idx = b->fork_dec;
                 d->first_own_idx = b->first_own;
                 const char *local = family_local_name(ctx, h);
                 if (local) {
@@ -844,84 +1023,117 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
             }
             free(holders);
         } else {
-            /* Scelta: il candidato che possiede il punto di diramazione (il
-             * commit e' nella sua regione propria) e' il padre naturale; se
-             * nessuno lo possiede, unico candidato; altrimenti l'unico a monte
-             * di tutti; altrimenti ambiguo. */
-            bool by_owner = false;
-            size_t count = 0;
-            size_t chosen = select_parent_family(ctx, b, b->cand, b->cand_count,
-                                                 &by_owner, &count);
+            /* Scelta del padre, in ordine di precedenza:
+             *  1. se il punto di diramazione e' la punta di un'altra famiglia,
+             *     quella famiglia e' il padre: lo decide la struttura;
+             *  2. se un tronco (long-lived) e' fra i candidati, e' il padre:
+             *     un tronco non si deduce, e' dichiarato;
+             *  3. se resta un solo candidato, e' il padre "dedotto";
+             *  4. se ne restano piu' di uno, nessuno e' preferibile agli
+             *     altri: stato ambiguo con l'elenco dei candidati e un
+             *     suggerimento (non e' un padre dedotto: il layout lo tratta
+             *     come tratteggiato finche' [parents] non dichiara il padre). */
+            size_t chosen = NO_POS;
+            size_t tip_parent = tip_family_at(ctx, b->fork_dec);
+            /* se la punta di un'altra famiglia e' il punto di diramazione, quella
+             * famiglia e' il padre: lo decide la struttura. Il filtro dei
+             * candidati ha gia' escluso i figli e chi sta dentro b. */
+            if (tip_parent != NO_POS && tip_parent != fi) {
+                for (size_t k = 0; k < b->cand_count; k++) {
+                    if (b->cand[k] == tip_parent) {
+                        chosen = tip_parent;
+                        break;
+                    }
+                }
+            }
+            if (chosen == NO_POS)
+                chosen = trunk_among(ctx, b);
+            if (chosen == NO_POS && b->cand_count == 1)
+                chosen = b->cand[0]; /* un solo candidato: e' il padre dedotto */
             const char *chosen_name =
                 (chosen != NO_POS) ? family_local_name(ctx, &ctx->families[chosen]) : NULL;
-            if (count == 1 && chosen_name) {
+            if (chosen != NO_POS && chosen_name) {
                 d->state = PARENT_DEDUCED;
                 d->parent = xstrdup(chosen_name);
-                if (by_owner)
+                if (chosen == tip_parent)
                     sb_appendf(&mot,
-                               "punto di diramazione %s: quel commit appartiene al ramo di '%s'",
-                               sh, d->parent);
-                else if (b->cand_count > 1)
-                    sb_appendf(&mot,
-                               "punto di diramazione %s; '%s' e' a monte degli altri candidati",
-                               sh, d->parent);
+                               "punto di diramazione %s: e' la punta di '%s'", sh,
+                               d->parent);
                 else
                     sb_appendf(&mot, "punto di diramazione %s sul ramo di '%s'", sh,
                                d->parent);
-            } else if (count == 1 && chosen != NO_POS &&
+            } else if (chosen != NO_POS &&
                        ctx->families[chosen].node_count == 1) {
                 /* famiglia di un solo riferimento remoto (nessun branch locale) */
                 d->state = PARENT_DEDUCED;
                 d->parent = xstrdup(ctx->out->branches[ctx->families[chosen].rep_node].name);
                 sb_appendf(&mot, "punto di diramazione %s sul ramo di '%s'", sh, d->parent);
+            } else if (b->cand_count == 1 && chosen != NO_POS) {
+                /* un solo candidato, ma con piu' nomi locali (alias veri):
+                 * la famiglia e' il padre, il nome no */
+                char *lhs = join_family_names(ctx, &chosen, 1);
+                d->state = PARENT_AMBIGUOUS;
+                sb_appendf(&mot,
+                           "punto di diramazione %s; piu' riferimenti sulla stessa punta: %s",
+                           sh, lhs);
+                free(lhs);
             } else {
                 char *lhs = join_family_names(ctx, b->cand, b->cand_count);
                 d->state = PARENT_AMBIGUOUS;
-                if (b->cand_count == 1)
-                    sb_appendf(&mot,
-                               "punto di diramazione %s; piu' riferimenti sulla stessa punta: %s",
-                               sh, lhs);
-                else
-                    sb_appendf(&mot,
-                               "piu' branch contengono il punto di diramazione %s: %s", sh,
-                               lhs);
+                sb_appendf(&mot, "punto di diramazione %s: %s", sh, lhs);
                 free(lhs);
+                /* Suggerimento fra i candidati: il piu' vecchio, perche' la
+                 * struttura non distingue e di solito il padre e' quello su cui
+                 * gli altri sono nati. Non e' un fatto dedotto: [parents]
+                 * dichiara il padre vero. */
+                size_t best = NO_POS;
+                int64_t best_date = 0;
+                size_t best_name = NO_POS;
+                bool name_tie = false;
+                for (size_t k = 0; k < b->cand_count; k++) {
+                    const Family *c = &ctx->families[b->cand[k]];
+                    int64_t when = (c->first_own != NO_POS) ? date_at(ctx, c->first_own)
+                                                             : date_at(ctx, c->tip_idx);
+                    size_t rep = c->rep_node;
+                    bool meglio;
+                    if (best == NO_POS) {
+                        meglio = true;
+                    } else if (when != best_date) {
+                        meglio = (when < best_date);
+                    } else {
+                        /* stessa data: spareggio dichiarato sul nome */
+                        int cmp = strcmp(ctx->out->branches[rep].name,
+                                         ctx->out->branches[best_name].name);
+                        meglio = (cmp < 0);
+                        if (cmp != 0)
+                            name_tie = true;
+                        else
+                            name_tie = false;
+                    }
+                    if (best == NO_POS || meglio) {
+                        if (best != NO_POS && when == best_date)
+                            name_tie = true;
+                        best = b->cand[k];
+                        best_date = when;
+                        best_name = rep;
+                    }
+                }
+                if (best != NO_POS) {
+                    const char *sug = family_local_name(ctx, &ctx->families[best]);
+                    if (!sug)
+                        sug = ctx->out->branches[ctx->families[best].rep_node].name;
+                    d->suggested = xstrdup(sug);
+                    if (name_tie)
+                        d->basis = SUGGESTION_NAME_TIE;
+                    else
+                        d->basis = SUGGESTION_DATE;
+                    append_note(&mot, name_tie
+                                              ? "padre suggerito per nome, a parita' di data"
+                                              : "padre suggerito per data, poco affidabile con rebase");
+                    sb_appendf(&mot, ": '%s'", d->suggested);
+                }
             }
         }
-    }
-
-    /* La menzione della data compare solo se l'ordinamento per data ha cambiato
-     * davvero l'esito: si ricalcolano i candidati senza la regola D5 e si
-     * confronta la scelta. Se il risultato sarebbe stato lo stesso, la frase
-     * sarebbe fuorviante (su branch1, per esempio, il candidato scartato non
-     * avrebbe cambiato nulla e la frase non compare).
-     *
-     * Il confronto e' quello che conta davvero: la regola D5 scarta sempre
-     * almeno un candidato, quindi le due liste non coincidono mai; se pero' la
-     * scelta finale resta la stessa, la data non ha deciso niente e non va
-     * dichiarata come spareggio. */
-    if (b->date_used) {
-        size_t *alt = NULL, alt_count = 0;
-        bool alt_date = false;
-        collect_candidates(ctx, fi, false, &alt, &alt_count, &alt_date);
-        bool senza_owner = false, con_owner = false;
-        size_t senza_count = 0, con_count = 0;
-        size_t senza =
-            select_parent_family(ctx, b, alt, alt_count, &senza_owner, &senza_count);
-        size_t con =
-            select_parent_family(ctx, b, b->cand, b->cand_count, &con_owner, &con_count);
-        /* stesso esito: stessa famiglia scelta, stesso numero di candidati che
-         * soddisfano la regola, stessa regola applicata e stesso ricorso al
-         * percorso dei "holder" (nessun candidato, in entrambi i casi) */
-        bool stesso_esito = (senza == con) && (senza_count == con_count) &&
-                            (senza_owner == con_owner) &&
-                            ((alt_count == 0) == (b->cand_count == 0));
-        if (stesso_esito)
-            menziona_data = false;
-        free(alt);
-    }
-    if (menziona_data) {
-        append_note(&mot, "scarto dei candidati basato sulla data (poco affidabile con rebase)");
     }
     d->motivation = mot.data;
 }
@@ -930,6 +1142,7 @@ static void deduction_free(Deduction *d)
 {
     free(d->parent);
     free(d->motivation);
+    free(d->suggested);
 }
 
 /* ---------- assegnazione ---------- */
@@ -998,6 +1211,7 @@ static void assign_family(Ctx *ctx, size_t fi)
             snprintf(mot, sizeof mot,
                      "remote-tracking che punta allo stesso commit di '%s'", n->mirror_of);
             set_parent(n, n->mirror_of, PARENT_CERTAIN, mot);
+            set_suggestion(n, NULL, SUGGESTION_NONE);
             if (!n->is_long_lived) {
                 set_fork(n, ctx, d.fork_idx);
                 set_first_own(n, ctx, d.first_own_idx);
@@ -1015,6 +1229,7 @@ static void assign_family(Ctx *ctx, size_t fi)
             sb_append(&mot, "tronco long-lived (configurazione): padre non dedotto");
             append_alias_note(ctx, fam, node, &mot);
             set_parent(n, NULL, PARENT_NONE, mot.data);
+            set_suggestion(n, NULL, SUGGESTION_NONE);
             sb_free(&mot);
             continue;
         }
@@ -1050,12 +1265,14 @@ static void assign_family(Ctx *ctx, size_t fi)
                 append_note(&mot, ov_note);
             append_alias_note(ctx, fam, node, &mot);
             set_parent(n, ov_parent, PARENT_CONFIGURED, mot.data);
+            set_suggestion(n, NULL, SUGGESTION_NONE);
         } else {
             sb_append(&mot, d.motivation ? d.motivation : "");
             if (ov_note[0])
                 append_note(&mot, ov_note);
             append_alias_note(ctx, fam, node, &mot);
             set_parent(n, d.parent, d.state, mot.data);
+            set_suggestion(n, d.suggested, d.basis);
             if (d.state == PARENT_NONE && fam->tip_idx != NO_POS)
                 n->genealogy_undetermined = true;
         }
@@ -1177,18 +1394,18 @@ bool history_build(History *out, const GitData *data, const GraphConfig *cfg,
         build_family_order(&ctx);
 
         size_t n = data->commit_count;
-        ctx.scratch_pos = xmalloc((n ? n : 1) * sizeof(size_t));
-        ctx.scratch_gen = xcalloc(n ? n : 1, sizeof(uint32_t));
         ctx.stack = xmalloc((n ? n : 1) * sizeof(size_t));
 
-        compute_ownership_and_forks(&ctx);
-
-
+        /* i bitset di raggiungibilita' servono per il fallback sui contenitori */
         for (size_t fi = 0; fi < ctx.family_count; fi++) {
             ctx.families[fi].reach = bitset_new(n);
             reach_build(&ctx, fi, ctx.families[fi].reach);
         }
-        build_rel(&ctx);
+        compute_forks(&ctx);
+        build_fork_index(&ctx);
+        compute_inside(&ctx);
+        build_peer_index(&ctx);
+        compute_first_own(&ctx);
         run_pass(&ctx);
 
         for (size_t oi = 0; oi < ctx.family_count; oi++)
@@ -1200,10 +1417,17 @@ bool history_build(History *out, const GitData *data, const GraphConfig *cfg,
     strmap_free(ctx.name_map);
     free(ctx.node_family);
     free(ctx.family_order);
-    free(ctx.owner);
-    free(ctx.rel);
-    free(ctx.scratch_pos);
-    free(ctx.scratch_gen);
+    free(ctx.nchain);
+    free(ctx.list_start);
+    free(ctx.list_count);
+    free(ctx.list_fill);
+    free(ctx.list_items);
+    free(ctx.fork_head);
+    free(ctx.tip_at);
+    free(ctx.trunk_at);
+    free(ctx.mark_gen);
+    free(ctx.fork_next);
+
     free(ctx.stack);
     for (size_t fi = 0; fi < ctx.family_count; fi++)
         family_free(&ctx.families[fi]);
@@ -1224,6 +1448,7 @@ void history_free(History *h)
         free(n->motivation);
         free(n->fork_hash);
         free(n->first_own_commit);
+        free(n->suggested_parent);
         for (size_t k = 0; k < n->alias_count; k++)
             free(n->alias_members[k]);
         free(n->alias_members);
