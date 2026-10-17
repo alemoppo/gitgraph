@@ -6,10 +6,14 @@ rem Crea un repository Git isolato e ripetibile per i test di gitgraph.
 rem Il percorso arriva da: argomento 1, variabile GG_TEST_REPO, oppure
 rem %TEMP%\gitgraph_test_repo.
 rem
-rem SICUREZZA: lo script cancella SOLO directory che esso stesso ha creato,
-rem riconosciute dal file .gitgraph_test_repo. Una directory esistente senza
-rem quel marcatore (o un percorso pericoloso come la radice, la home o la
-rem directory temporanea) fa fallire lo script senza toccare nulla.
+rem SICUREZZA: lo script cancella una directory solo se e' una directory di test
+rem dedicata: il nome finale deve essere "gitgraph_test_repo" oppure
+rem "gitgraph_test_repo_<scenario>", il percorso non puo' contenere "." o "..",
+rem non puo' essere la radice, la directory corrente, la home o quella
+rem temporanea e, se la directory esiste, deve contenere il marcatore
+rem .gitgraph_test_repo con il testo esatto "gitgraph test repository" e nessun
+rem file diverso da quelli creati qui. Altrimenti lo script fallisce senza
+rem toccare nulla: il marcatore da solo non autorizza nessuna cancellazione.
 rem
 rem Contenuto: main(A,B,C), branch1 da B, branch2 da B2, merge --no-ff,
 rem fast-forward, branch cancellato dopo il merge, gruppo di alias (piu' branch
@@ -25,16 +29,33 @@ set "REPO=%~1"
 if "%REPO%"=="" set "REPO=%GG_TEST_REPO%"
 if "%REPO%"=="" set "REPO=%TEMP%\gitgraph_test_repo"
 set "MARKER=.gitgraph_test_repo"
+set "MARKERTEXT=gitgraph test repository"
+set "BASENAME=gitgraph_test_repo"
 
-rem --- controlli di sicurezza sul percorso ------------------------------------
-if "%REPO%"=="" (
-    echo ERRORE: percorso del repository di prova vuoto & exit /b 1
-)
-rem normalizzo eventuali barre finali per i confronti
-if "%REPO:~-1%"=="\" set "REPO=%REPO:~0,-1%"
-if "%REPO%"=="\" set "REPO=%REPO:~0,-1%"
+rem --- SICUREZZA: cosa puo' essere cancellato --------------------------------
+rem Lo script cancella una directory solo se tutte queste condizioni valgono:
+rem   1. il percorso non e' vuoto e non contiene "." o ".." (nessuna risoluzione
+rem      ambigua: i percorsi con puntini vengono rifiutati, non normalizzati);
+rem   2. il nome finale e' esattamente %BASENAME% oppure %BASENAME%_<scenario>
+rem      (whitelist: nessuna directory arbitraria puo' essere cancellata);
+rem   3. il percorso non e' la radice del filesystem, la directory corrente,
+rem      la home o la directory temporanea;
+rem   4. se la directory esiste, contiene il marcatore %MARKER% con il testo
+rem      esatto %MARKERTEXT% e non contiene altri file oltre quelli creati qui
+rem      (il marcatore da solo non autorizza nessuna cancellazione).
+rem Altrimenti lo script fallisce senza toccare nulla.
+if "%REPO%"=="" goto :unsafe_empty
+rem ".." in qualsiasi posizione e una "\." finale: percorsi non risolvibili
+set "LAST2=%REPO:~-2%"
+if "%LAST2%"=="\." goto :unsafe_dots
+echo "%REPO%" | findstr /r /c:"\.\." >nul && goto :unsafe_dots
 for %%I in ("%REPO%") do set "REPORES=%%~fI"
 if "%REPORES%"=="\" goto :unsafe_root
+set "DRIVEONLY=%SystemDrive%\"
+if /i "%REPORES%"=="%DRIVEONLY%" goto :unsafe_root
+rem gli helper leggono REPORES dal%: passare il percorso come argomento di
+rem "call" e' fragile quando termina con "\" (rompe il parsing di cmd)
+call :check_name || goto :unsafe_name
 if /i "%REPORES%"=="%CD%" goto :unsafe_same
 if /i "%REPORES%"=="%USERPROFILE%" goto :unsafe_home
 if /i "%REPORES%"=="%TEMP%" goto :unsafe_temp
@@ -44,13 +65,17 @@ mkdir "%REPORES%" || goto :err
 goto :created
 
 :exists
-if not exist "%REPORES%\%MARKER%" goto :unsafe_marker
+if not exist "%REPORES%\%MARKER%" goto :unsafe_foreign
+set "MARKEROK="
+for /f "usebackq delims=" %%L in ("%REPORES%\%MARKER%") do if /i "%%L"=="%MARKERTEXT%" set "MARKEROK=1"
+if not defined MARKEROK goto :unsafe_foreign
+call :check_entries || goto :unsafe_foreign
 rmdir /s /q "%REPORES%" || goto :err
 mkdir "%REPORES%" || goto :err
 
 :created
 rem marcatore: da qui in poi la directory e' riconoscibile come nostra
-> "%REPORES%\%MARKER%" echo gitgraph test repository
+> "%REPORES%\%MARKER%" echo %MARKERTEXT%
 set "REPO=%REPORES%"
 
 set "GIT_AUTHOR_NAME=Test User"
@@ -261,6 +286,35 @@ git -C "%REPO%" update-ref refs/remotes/origin/feature-x feature/x || goto :err
 echo OK: %REPO%
 exit /b 0
 
+rem --- helper: nome finale ammesso (whitelist) -------------------------------
+rem lavora su %REPORES%: %1 non e' usato perche' un percorso che termina con
+rem "\" rompe il parsing di "call".
+:check_name
+for %%F in ("%REPORES%") do set "CHECKBASE=%%~nxF"
+if /i "%CHECKBASE%"=="%BASENAME%" exit /b 0
+if /i not "%CHECKBASE:~0,19%"=="%BASENAME%_" exit /b 1
+if "%CHECKBASE:~19%"=="" exit /b 1
+exit /b 0
+
+rem --- helper: la directory contiene solo i file che lo script crea ----------
+rem %REPORES% non deve contenere entry impreviste.
+:check_entries
+for %%D in ("%REPORES%") do set "CHECKDIR=%%~fD"
+set "UNEXPECTED="
+for /f "delims=" %%E in ('dir /b /a "%CHECKDIR%" 2^>nul') do (
+    if /i not "%%E"=="%MARKER%" if /i not "%%E"==".git" if /i not "%%E"=="hello.txt" if /i not "%%E"=="wip.txt" if /i not "%%E"=="msg-c.txt" set "UNEXPECTED=%%E"
+)
+if defined UNEXPECTED exit /b 1
+exit /b 0
+
+:unsafe_empty
+echo ERRORE: percorso del repository di prova vuoto & exit /b 1
+:unsafe_dots
+echo ERRORE: "%REPO%" contiene "." o "..": rifiutato perche' la risoluzione & exit /b 1
+echo         del percorso sarebbe ambigua. Usa il percorso finale gia' risolto. & exit /b 1
+:unsafe_name
+echo ERRORE: "%REPORES%" non e' una directory di test ammessa. & exit /b 1
+echo         Il nome deve essere "%BASENAME%" o "%BASENAME%_<scenario>". & exit /b 1
 :unsafe_root
 echo ERRORE: "%REPORES%" e' la radice del filesystem: rifiutato. & exit /b 1
 :unsafe_same
@@ -269,9 +323,10 @@ echo ERRORE: "%REPORES%" e' la directory corrente: rifiutato. & exit /b 1
 echo ERRORE: "%REPORES%" e' la home utente: rifiutato. & exit /b 1
 :unsafe_temp
 echo ERRORE: "%REPORES%" e' la directory temporanea: rifiutato. & exit /b 1
-:unsafe_marker
-echo ERRORE: "%REPORES%" esiste e non contiene il marcatore %MARKER%. & exit /b 1
-echo         lo script non cancella directory che non ha creato lui. & exit /b 1
+:unsafe_foreign
+echo ERRORE: "%REPORES%" esiste ma non e' una directory di test di gitgraph. & exit /b 1
+echo         Servono il marcatore %MARKER% con il testo esatto e nessun altro & exit /b 1
+echo         file: niente viene cancellato. & exit /b 1
 
 :err
 echo ERRORE durante la creazione del repository di test

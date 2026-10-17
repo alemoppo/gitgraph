@@ -5,10 +5,18 @@
 # Crea un repository Git isolato e ripetibile per i test di gitgraph.
 # Default: ${TMPDIR:-/tmp}/gitgraph_test_repo
 #
-# SICUREZZA: lo script cancella SOLO directory che esso stesso ha creato,
-# riconosciute dal file .gitgraph_test_repo. Una directory esistente senza
-# quel marcatore (o un percorso pericoloso come "/", la home o la directory
-# temporanea) fa fallire lo script senza toccare nulla.
+# NOTA: gitgraph e' supportato solo su Windows (vedi README). Questo script e'
+# il gemello POSIX di make_test_repo.bat: viene mantenuto allineato per un
+# eventuale porting, ma non e' eseguito dalla suite di test.
+#
+# SICUREZZA: lo script cancella una directory solo se e' una directory di test
+# dedicata: il nome finale deve essere "gitgraph_test_repo" oppure
+# "gitgraph_test_repo_<scenario>", il percorso non puo' contenere "." o "..",
+# non puo' essere la radice, la directory corrente, la home o quella
+# temporanea e, se la directory esiste, deve contenere il marcatore
+# .gitgraph_test_repo con il testo esatto "gitgraph test repository" e nessun
+# file diverso da quelli creati qui. Altrimenti lo script fallisce senza
+# toccare nulla: il marcatore da solo non autorizza nessuna cancellazione.
 #
 # Stesso contenuto della versione .bat: main(A,B,C), branch1 da B, branch2
 # da B2, merge --no-ff, fast-forward, branch cancellato dopo il merge, gruppo
@@ -23,18 +31,38 @@ set -euo pipefail
 
 REPO="${1:-${GG_TEST_REPO:-${TMPDIR:-/tmp}/gitgraph_test_repo}}"
 MARKER=".gitgraph_test_repo"
+MARKERTEXT="gitgraph test repository"
+BASENAME="gitgraph_test_repo"
 
 die() { echo "ERRORE: $*" >&2; exit 1; }
 
 # --- controlli di sicurezza sul percorso --------------------------------------
 [ -n "$REPO" ] || die "percorso del repository di prova vuoto"
-# percorso assoluto normalizzato
+# percorsi con "." o "..": rifiutati, non normalizzati (nessuna risoluzione
+# ambigua del percorso)
+case "$REPO" in
+    *..*|*/.|*/..|.|..|*/) die "\"$REPO\" contiene \".\" o \"..\": rifiutato" ;;
+esac
+# percorso assoluto con la directory superiore risolta fisicamente
 case "$REPO" in
     /*) ;;
     *) REPO="$PWD/$REPO" ;;
 esac
-# niente barre finali (radice "/"" resta "/")
-while [ "${#REPO}" -gt 1 ] && [ "${REPO%/}" != "$REPO" ]; do REPO="${REPO%/}"; done
+base="${REPO##*/}"
+parent="${REPO%/*}"
+[ -n "$parent" ] || parent="/"
+if [ -d "$parent" ]; then
+    parent="$(cd "$parent" && pwd -P)"
+fi
+REPO="$parent/$base"
+
+# whitelist del nome: nessuna directory arbitraria puo' essere cancellata
+if [ "$base" != "$BASENAME" ]; then
+    case "$base" in
+        "${BASENAME}_"?*) ;;
+        *) die "\"$REPO\" non e' una directory di test ammessa: il nome deve essere \"$BASENAME\" o \"${BASENAME}_<scenario>\"" ;;
+    esac
+fi
 
 [ "$REPO" = "/" ] && die "\"$REPO\" e' la radice del filesystem: rifiutato"
 [ "$REPO" = "$PWD" ] && die "\"$REPO\" e' la directory corrente: rifiutato"
@@ -43,15 +71,25 @@ while [ "${#REPO}" -gt 1 ] && [ "${REPO%/}" != "$REPO" ]; do REPO="${REPO%/}"; d
 [ "$REPO" = "/tmp" ] && die "\"$REPO\" e' la directory temporanea: rifiutato"
 
 if [ -d "$REPO" ]; then
+    # il marcatore da solo non basta: testo esatto e nessun file imprevisto
     [ -f "$REPO/$MARKER" ] ||
-        die "\"$REPO\" esiste e non contiene il marcatore $MARKER: lo script non cancella directory che non ha creato lui"
+        die "\"$REPO\" esiste ma non e' una directory di test di gitgraph: niente viene cancellato"
+    [ "$(cat "$REPO/$MARKER")" = "$MARKERTEXT" ] ||
+        die "\"$REPO/$MARKER\" non contiene il testo atteso: niente viene cancellato"
+    for entry in "$REPO"/* "$REPO"/.[!.]*; do
+        name="${entry##*/}"
+        case "$name" in
+            "$MARKER"|.git|hello.txt|wip.txt|msg-c.txt) ;;
+            *) die "\"$name\" in \"$REPO\" non e' un file creato da questo script: niente viene cancellato" ;;
+        esac
+    done
     rm -rf -- "$REPO"
 elif [ -e "$REPO" ]; then
     die "\"$REPO\" esiste e non e' una directory: rifiutato"
 fi
 mkdir -p "$REPO"
 # marcatore: da qui in poi la directory e' riconoscibile come nostra
-echo "gitgraph test repository" > "$REPO/$MARKER"
+echo "$MARKERTEXT" > "$REPO/$MARKER"
 
 export GIT_AUTHOR_NAME="Test User"
 export GIT_AUTHOR_EMAIL="test@example.com"

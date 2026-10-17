@@ -3,8 +3,20 @@
 # Fase 1: libreria "core" (util, config, gitdata, history) senza dipendenze
 # esterne, strumento di dump testuale e test automatici (ctest).
 # La GUI SDL3/SDL3_ttf verra' aggiunta in una fase successiva.
+#
+# PIATTAFORMA: solo Windows. src/gitdata.c usa le API Win32 (CreateProcessW,
+# pipe, thread) e i test chiamano cmd.exe per generare il repository di prova:
+# portare il progetto altrove richiederebbe un altro strato di esecuzione dei
+# processi, quindi qui il tentativo di compilare viene fermato subito e con un
+# messaggio chiaro invece di errori a cascata.
 cmake_minimum_required(VERSION 3.16)
 project(gitgraph C)
+
+if(NOT WIN32)
+    message(FATAL_ERROR
+            "gitgraph e' supportato solo su Windows (usa le API Win32 in "
+            "src/gitdata.c e cmd.exe negli script di test).")
+endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -26,6 +38,7 @@ target_include_directories(gg_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 if(MSVC)
     target_compile_options(gg_core PRIVATE /W4 /utf-8)
 else()
+    # gcc/clang su Windows (MSYS2 UCRT64 e simili)
     target_compile_options(gg_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
@@ -52,7 +65,9 @@ add_executable(scale_repo_gen tests/make_scale_repo.c)
 # Repository di prova generato prima dei test (fixture ctest). La generazione
 # passa da uno script CMake che invoca lo script di piattaforma: ctest non
 # lancia mai "cmd /c" direttamente (quoting di cmd poco controllabile).
-set(GG_TEST_REPO "${CMAKE_CURRENT_BINARY_DIR}/test_repo"
+# Il nome della directory deve essere uno di quelli ammessi dallo script
+# (whitelist delle directory di test).
+set(GG_TEST_REPO "${CMAKE_CURRENT_BINARY_DIR}/gitgraph_test_repo"
     CACHE PATH "Repository Git generato per i test")
 add_test(NAME make_test_repo
          COMMAND "${CMAKE_COMMAND}"
@@ -61,6 +76,18 @@ add_test(NAME make_test_repo
                  "-P"
                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/make_test_repo_fixture.cmake")
 set_tests_properties(make_test_repo PROPERTIES FIXTURES_SETUP testrepo)
+
+# Protezioni dello script di generazione: percorsi non ammessi, directory
+# estranee con il marcatore, percorsi con "." e "..", radice del filesystem,
+# argomento vuoto e rigenerazione normale. Tutto avviene in una sandbox sotto
+# la build: nessun dato reale viene toccato.
+add_test(NAME scripts_guard
+         COMMAND "${CMAKE_COMMAND}"
+                 "-DGG_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+                 "-DGG_GUARD_DIR=${CMAKE_CURRENT_BINARY_DIR}/guard_sandbox"
+                 "-P"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scripts_guard.cmake")
+set_tests_properties(scripts_guard PROPERTIES TIMEOUT 600)
 
 add_test(NAME core COMMAND test_core "${GG_TEST_REPO}")
 set_tests_properties(core PROPERTIES FIXTURES_REQUIRED testrepo)
