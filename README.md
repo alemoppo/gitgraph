@@ -206,12 +206,17 @@ Undici test, nessuno con finestra:
    rigenerazione dentro la radice autorizzata (comprese forme diverse del
    percorso: barre in avanti, barra finale, maiuscole, suffisso di scenario),
    rifiuto di una directory valida fuori dalla radice, di una sorella con nome
-   simile (`test_repos_extra`), di una destinazione che è una giunzione, di
-   marcatore con testo aggiuntivo o diverso, di directory con file estranei,
-   dei tentativi di uscire con `..`, della radice del filesystem e della home,
-   di nome non ammesso, di radice non impostata o inesistente e di argomento
-   vuoto. Ogni caso negativo verifica anche che i file sentinella siano ancora
-   presenti e inalterati. Tutto avviene in una sandbox sotto `build/`;
+   simile (`test_repos_extra`), di una **radice che è una giunzione** verso
+   l'esterno (con la destinazione fisica verificata intatta), di una
+   destinazione che è una giunzione, dei marcatori non ammessi (27 byte con la
+   prima riga corretta, terminatore misto, testo aggiuntivo) e di quelli ammessi
+   (24, 25 e 26 byte: devono essere accettati e rigenerati), di directory con
+   file estranei, dei tentativi di uscire con `..`, della radice del filesystem
+   e della home, di nome non ammesso, di radice non impostata o inesistente e
+   di argomento vuoto. Ogni caso negativo verifica anche che i file sentinella
+   siano ancora presenti e inalterati; se `mklink` non è disponibile i casi che
+   richiedono una giunzione sono dichiarati **saltati**, mai superati. Tutto
+   avviene in una sandbox sotto `build/`;
 3. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
    per data, override, long-lived, determinismo, quoting degli argomenti e
    cattura di stdout/stderr senza blocco (pipe riempite oltre la capacita',
@@ -261,7 +266,12 @@ entrambi mancano lo script si rifiuta, senza alcun percorso predefinito.
 Tutte queste condizioni devono valere, altrimenti lo script fallisce senza
 toccare nulla:
 
-- `GG_TEST_ROOT` è impostata ed esiste come directory;
+- `GG_TEST_ROOT` è impostata, esiste come directory e **non è un collegamento**:
+  il controllo guarda gli attributi del filesystem e sale fino alla radice del
+  filesystem, perché il confronto testuale dei percorsi non risolve i
+  collegamenti (una radice-giunzione verso l'esterno passerebbe il confronto con
+  il padre della destinazione). In caso di dubbio (controllo non eseguibile,
+  permessi, PowerShell non disponibile) la cancellazione viene rifiutata;
 - il percorso non contiene `.` o `..` e non termina con `.` (nessuna
   risoluzione ambigua);
 - una volta risolto (`/` e `\` normalizzati, percorso completo), il **padre**
@@ -273,11 +283,14 @@ toccare nulla:
 - il percorso non è la radice del filesystem, la directory corrente, la home o
   quella temporanea;
 - se la directory esiste: coincide con radice + nome, **non è un collegamento**
-  (giunzione o simbolico, che porterebbero la cancellazione fuori dalla radice),
-  contiene il marcatore `.gitgraph_test_repo` con **esattamente** il testo
-  `gitgraph test repository` (eventualmente seguito dal solo terminatore di
-  riga: nessuna riga in più, nessun testo prima o dopo) e nessun file diverso
-  da quelli creati dallo script (`.git`, `hello.txt`, `wip.txt`, `msg-c.txt`).
+  (giunzione o simbolico, che porterebbero la cancellazione fuori dalla radice;
+  per la destinazione è sufficiente il percorso stesso, perché i suoi antenati
+  sono la radice, già verificata), contiene il marcatore `.gitgraph_test_repo`
+  con **esattamente** il testo `gitgraph test repository` e nessun altro byte:
+  il confronto è fatto sui byte (24 senza terminatore, 25 con LF, 26 con CRLF),
+  perché leggere solo la prima riga accetterebbe contenuti aggiuntivi che non
+  la modificano; e nessun file diverso da quelli creati dallo script (`.git`,
+  `hello.txt`, `wip.txt`, `msg-c.txt`).
 
 Il nome della directory e il marcatore, da soli, **non** autorizzano mai una
 cancellazione: sono due delle condizioni, non un suffisso sufficiente. Tutte le

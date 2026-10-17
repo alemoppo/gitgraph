@@ -34,9 +34,13 @@ rem --- SICUREZZA: cosa puo' essere cancellato --------------------------------
 rem La cancellazione ricorsiva e' autorizzata solo dentro la radice dei
 rem repository di test indicata da GG_TEST_ROOT (impostata da CMake, creata
 rem dalla configurazione) e solo se valgono TUTTE le condizioni seguenti:
-rem   1. GG_TEST_ROOT e' impostata, esiste come directory e viene risolta a
+rem   1. GG_TEST_ROOT e' impostata, esiste come directory, viene risolta a
 rem      percorso completo (%%~f: normalizza "/" e "\", majuscole/minuscole e
-rem      percorsi relativi);
+rem      percorsi relativi) e NON e' un collegamento: ne' la radice ne' alcuno
+rem      dei suoi antenati (un confronto testuale non basta, perche' una
+rem      giunzione verso l'esterno passerebbe il confronto con il padre);
+rem      il controllo e' fatto sui attributi del filesystem, in caso di dubbio
+rem      la cancellazione viene rifiutata;
 rem   2. il percorso richiesto e' non vuoto e non contiene "." o "..";
 rem   3. la directory padre del percorso risolto coincide ESATTAMENTE con la
 rem      radice risolta (uguaglianza, non confronto di prefisso: una directory
@@ -47,7 +51,8 @@ rem   5. il percorso non e' la radice del filesystem, la directory corrente,
 rem      la home o la directory temporanea;
 rem   6. se la directory esiste, coincide con radice+nome, non e' un
 rem      collegamento (giunzione o simbolico), contiene il marcatore %MARKER%
-rem      con il testo esatto %MARKERTEXT% e null'altro oltre ai file creati qui.
+rem      con il contenuto esatto %MARKERTEXT% (24 byte, oppure 25 con LF o 26
+rem      con CRLF: nessun byte in piu') e null'altro oltre ai file creati qui.
 rem Altrimenti lo script fallisce senza toccare nulla: il solo nome della
 rem directory non autorizza mai nessuna cancellazione.
 
@@ -57,6 +62,12 @@ for %%R in ("%GG_TEST_ROOT%") do set "ROOTRES=%%~fR"
 if "%ROOTRES:~-1%"=="\" set "ROOTRES=%ROOTRES:~0,-1%"
 if "%ROOTRES%"=="" goto :unsafe_no_root
 if not exist "%ROOTRES%\" goto :unsafe_no_root
+rem la radice non deve essere un collegamento, e nemmeno uno dei suoi antenati:
+rem il confronto testuale di sotto normalizza "/" e "\" ma NON risolve i
+rem collegamenti del filesystem, quindi una radice che e' una giunzione verso
+rem l'esterno passerebbe il confronto e la cancellazione raggiungerebbe
+rem contenuti esterni. Il controllo avviene qui, prima di ogni operazione.
+call :check_no_reparse "%ROOTRES%" radice antenati || goto :unsafe_root_link
 
 rem --- 2. percorso vuoto o con puntini ---------------------------------------
 rem controlli indipendenti dal separatore: ".." in qualsiasi posizione e una
@@ -105,9 +116,7 @@ for %%I in ("%REPORES%") do set "DESTBASE=%%~nxI"
 if /i not "%DESTRES%"=="%ROOTRES%\%DESTBASE%" goto :unsafe_outside
 rem nessun collegamento: una giunzione o un collegamento simbolico porterebbe
 rem la cancellazione ricorsiva fuori dalla radice autorizzata
-set "ISLINK="
-for /f "delims=" %%L in ('dir /a:l /b "%PARENTRES%" 2^>nul') do if /i "%%L"=="%DESTBASE%" set "ISLINK=1"
-if defined ISLINK goto :unsafe_link
+call :check_no_reparse "%REPORES%" destinazione || goto :unsafe_link
 if not exist "%REPORES%\%MARKER%" goto :unsafe_foreign
 call :check_marker || goto :unsafe_foreign
 call :check_entries || goto :unsafe_foreign
@@ -348,20 +357,36 @@ if "%PARENTRES%"=="" exit /b 1
 if /i not "%PARENTRES%"=="%ROOTRES%" exit /b 1
 exit /b 0
 
+rem --- helper: nessun collegamento nel percorso (e nei suoi antenati) --------
+rem %1 = percorso da ispezionare, %2 = etichetta per il messaggio, %3 facoltativo
+rem = "antenati" per salire anche nei componenti superiori: lo si usa per la
+rem radice, i cui antenati devono essere directory reali. Per la destinazione non
+rem serve, perche' i suoi antenati sono la radice, gia' verificata.
+rem Il controllo e' fatto sugli attributi del filesystem da check_no_reparse.ps1
+rem e su quelli del marcatore da check_marker.ps1: "set /p" leggerebbe solo la
+rem prima riga (accettando contenuti aggiuntivi) e "dir /a:l" non coprirebbe i
+rem componenti del percorso. Qualsiasi codice di uscita diverso da zero fa
+rem fallire: in caso di dubbio non si cancella.
+:check_no_reparse
+set "NOARGS=-Path %1"
+if "%~3"=="antenati" set "NOARGS=-Path %1 -IncludeAncestors"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_no_reparse.ps1" %NOARGS%
+if errorlevel 2 goto :chk_link
+if errorlevel 1 goto :chk_unknown
+exit /b 0
+:chk_link
+echo ERRORE: %2 "%~1": e' un collegamento (giunzione o simbolico). & exit /b 1
+:chk_unknown
+echo ERRORE: %2 "%~1": collegamenti non verificabili, rifiutato. & exit /b 1
+
 rem --- helper: il marcatore contiene esattamente il testo previsto ----------
-rem %REPORES%\<marcatore> deve valere "%MARKERTEXT%": niente righe in piu', niente
-rem testo prima o dopo. Sono ammessi solo il testo da solo o con il terminatore
-rem di riga atteso (LF o CRLF): quindi 25, 26 o 27 byte. Il controllo della
-rem dimensione fissa lo scarto di qualsiasi contenuto aggiuntivo, il confronto
-rem della prima riga fissa il testo (le variabili sono rilette fuori dai
-rem blocchi, per non dover usare l'espansione ritardata).
+rem Il contenuto ammesso e' "%MARKERTEXT%" da solo o seguito dal solo
+rem terminatore di riga (LF o CRLF): 24, 25 o 26 byte. Il confronto e' fatto
+rem sui byte da check_marker.ps1, quindi un byte in piu' che non cambia la
+rem prima riga viene rifiutato.
 :check_marker
-set "MARKERFILE=%REPORES%\%MARKER%"
-for %%F in ("%MARKERFILE%") do set "MARKSIZE=%%~zF"
-if not "%MARKSIZE%"=="25" if not "%MARKSIZE%"=="26" if not "%MARKSIZE%"=="27" exit /b 1
-set "MARKERLINE="
-set /p "MARKERLINE=" < "%MARKERFILE%"
-if not "%MARKERLINE%"=="%MARKERTEXT%" exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_marker.ps1" "%REPORES%\%MARKER%" "%MARKERTEXT%"
+if errorlevel 1 exit /b 1
 exit /b 0
 
 rem --- helper: la directory contiene solo i file che lo script crea ----------
@@ -383,9 +408,13 @@ echo ERRORE: "%REPORES%" non e' dentro la radice autorizzata "%ROOTRES%". & exit
 echo         Niente viene cancellato: la destinazione deve essere un nome & exit /b 1
 echo         ammesso (%BASENAME% o %BASENAME%_<scenario>) direttamente in essa. & exit /b 1
 :unsafe_link
-echo ERRORE: "%REPORES%" e' un collegamento (giunzione o simbolico): rifiutato. & exit /b 1
+echo ERRORE: la destinazione e' un collegamento o non e' verificabile: rifiutato. & exit /b 1
 echo         Niente viene cancellato: un collegamento puo' puntare fuori dalla & exit /b 1
 echo         radice autorizzata. & exit /b 1
+:unsafe_root_link
+echo ERRORE: la radice autorizzata e' un collegamento o non e' verificabile. & exit /b 1
+echo         Niente viene creato o cancellato: la radice deve essere una & exit /b 1
+echo         directory reale, non una giunzione o un collegamento simbolico. & exit /b 1
 :unsafe_empty
 echo ERRORE: percorso del repository di prova vuoto & exit /b 1
 :unsafe_dots
