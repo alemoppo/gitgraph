@@ -518,52 +518,130 @@ static void build_rel(Ctx *ctx)
 
 /* ---------- candidati ---------- */
 
+/* Calcola i candidati di una famiglia. Con use_date false la regola D5 (fork
+ * uguali, spareggio sulla data) non viene applicata: serve a confrontare il
+ * risultato con e senza data. La lista dei candidati e' libera: chi chiama deve
+ * liberarla.
+ */
+static void collect_candidates(const Ctx *ctx, size_t bi, bool use_date,
+                               size_t **cand_out, size_t *cand_count_out,
+                               bool *date_used_out)
+{
+    const Family *b = &ctx->families[bi];
+    size_t g = ctx->family_count;
+    size_t *cand = NULL;
+    size_t n = 0;
+    bool date_used = false;
+    if (b->tip_idx == NO_POS || b->f == NO_POS || b->trunk) {
+        *cand_out = cand;
+        *cand_count_out = n;
+        *date_used_out = date_used;
+        return;
+    }
+    const uint8_t *rel_b = &ctx->rel[bi * g];
+    for (size_t xi = 0; xi < g; xi++) {
+        if (xi == bi)
+            continue;
+        const Family *beta = &ctx->families[xi];
+        if (beta->tip_idx == NO_POS)
+            continue;
+        uint8_t rb = ctx->rel[xi * g + bi]; /* f(b), tip(b) vs catena di beta */
+        if (rb & REL_TIP_ON_CHAIN)
+            continue; /* D1: beta discende da b */
+        if (rel_b[xi] & REL_F_ABOVE)
+            continue; /* D2: beta si e' diramato da un commit interno di b */
+        if (!(rb & REL_F_ON_CHAIN))
+            continue; /* D6: beta non contiene il punto di diramazione */
+        if (!beta->trunk) {
+            if (beta->first_own != NO_POS) {
+                if (rb & REL_F_BELOW)
+                    continue; /* D3: beta non esisteva a f(b) */
+            } else if (beta->tip_idx != b->f) {
+                continue; /* D4: beta assorbito (FF/alias), non fa da padre */
+            }
+            /* D5: fork uguali, decisione per data (spareggio dichiarato) */
+            if (use_date && beta->f == b->f && beta->first_own != NO_POS &&
+                b->first_own != NO_POS &&
+                date_at(ctx, beta->first_own) > date_at(ctx, b->first_own)) {
+                date_used = true;
+                continue;
+            }
+        }
+        cand = xrealloc(cand, (n + 1) * sizeof(size_t));
+        cand[n++] = xi;
+    }
+    *cand_out = cand;
+    *cand_count_out = n;
+    *date_used_out = date_used;
+}
+
+/* Una passata sui candidati: l'ordine di visita non conta (i candidati sono
+ * determinati dalla struttura, non da chi viene prima), ma si tiene
+ * esplicito perche' il risultato sia riproducibile. */
 static void run_pass(Ctx *ctx)
 {
     size_t g = ctx->family_count;
     for (size_t oi = 0; oi < g; oi++) {
         size_t bi = ctx->family_order[oi];
         Family *b = &ctx->families[bi];
+        free(b->cand);
+        b->cand = NULL;
         b->cand_count = 0;
         b->date_used = false;
-        if (b->tip_idx == NO_POS || b->f == NO_POS || b->trunk)
-            continue;
-        const uint8_t *rel_b = &ctx->rel[bi * g];
-        for (size_t xi = 0; xi < g; xi++) {
-            if (xi == bi)
-                continue;
-            Family *beta = &ctx->families[xi];
-            if (beta->tip_idx == NO_POS)
-                continue;
-            uint8_t rb = ctx->rel[xi * g + bi]; /* f(b), tip(b) vs catena di beta */
-            if (rb & REL_TIP_ON_CHAIN)
-                continue; /* D1: beta discende da b */
-            if (rel_b[xi] & REL_F_ABOVE)
-                continue; /* D2: beta si e' diramato da un commit interno di b */
-            if (!(rb & REL_F_ON_CHAIN))
-                continue; /* D6: beta non contiene il punto di diramazione */
-            if (!beta->trunk) {
-                if (beta->first_own != NO_POS) {
-                    if (rb & REL_F_BELOW)
-                        continue; /* D3: beta non esisteva a f(b) */
-                } else if (beta->tip_idx != b->f) {
-                    continue; /* D4: beta assorbito (FF/alias), non fa da padre */
-                }
-                /* D5: fork uguali, decisione per data (spareggio dichiarato) */
-                if (beta->f == b->f && beta->first_own != NO_POS &&
-                    b->first_own != NO_POS &&
-                    date_at(ctx, beta->first_own) > date_at(ctx, b->first_own)) {
-                    b->date_used = true;
-                    continue;
-                }
-            }
-            b->cand = xrealloc(b->cand, (b->cand_count + 1) * sizeof(size_t));
-            b->cand[b->cand_count++] = xi;
-        }
+        collect_candidates(ctx, bi, true, &b->cand, &b->cand_count, &b->date_used);
     }
 }
 
 /* ---------- nomi ---------- */
+
+/* Sceglie il candidato padre fra quelli indicati: il candidato che possiede il
+ * punto di diramazione (il commit e' nella sua regione propria) e' il padre
+ * naturale; se nessuno lo possiede, l'unico candidato; altrimenti l'unico a
+ * monte di tutti; altrimenti nessuno (ambiguo). Restituisce l'indice della
+ * famiglia scelta, scrive in *by_owner se e' stata la regola del proprietario e
+ * in *count quanti candidati soddisfano la regola applicata. */
+static size_t select_parent_family(const Ctx *ctx, const Family *b,
+                                   const size_t *cand, size_t cand_count,
+                                   bool *by_owner, size_t *count_out)
+{
+    size_t chosen = NO_POS;
+    size_t count = 0;
+    *by_owner = false;
+
+    if (b->f != NO_POS && ctx->owner[b->f] != NO_POS) {
+        for (size_t i = 0; i < cand_count; i++) {
+            if (cand[i] == ctx->owner[b->f]) {
+                chosen = cand[i];
+                count++;
+            }
+        }
+        *by_owner = (count == 1);
+    }
+    if (!*by_owner && cand_count == 1) {
+        chosen = cand[0];
+        count = 1;
+    }
+    if (!*by_owner && count != 1 && cand_count > 1) {
+        count = 0;
+        for (size_t i = 0; i < cand_count; i++) {
+            const Family *c = &ctx->families[cand[i]];
+            bool ok = true;
+            for (size_t j = 0; j < cand_count && ok; j++) {
+                if (i == j)
+                    continue;
+                const Family *o = &ctx->families[cand[j]];
+                if (!bitset_test(o->reach, c->tip_idx))
+                    ok = false;
+            }
+            if (ok) {
+                chosen = cand[i];
+                count++;
+            }
+        }
+    }
+    *count_out = count;
+    return chosen;
+}
 
 /* Nomi dei riferimenti delle famiglie indicate, nell'ordine deterministico
  * delle famiglie (long-lived prima, poi nome del rappresentante); dentro una
@@ -664,6 +742,17 @@ typedef struct {
     size_t first_own_idx;
 } Deduction;
 
+/* Accoda una nota a una motivazione, preceduta dal separatore "; " solo se
+ * c'e' gia' testo: una riga che comincia con "motivo: ; ..." direbbe che
+ * l'hai letta male, perche' il separatore non separa niente. */
+static void append_note(StrBuf *mot, const char *testo)
+{
+    if (mot->len)
+        sb_append(mot, "; ");
+    sb_append(mot, testo);
+}
+
+/* Deduce il padre di una famiglia e la motivazione della scelta. */
 static void deduce(Ctx *ctx, size_t fi, Deduction *d)
 {
     memset(d, 0, sizeof *d);
@@ -674,6 +763,8 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
     char sh[16];
     StrBuf mot;
     sb_init(&mot);
+    /* la menzione della data si puo' rivelare non necessaria piu' in fondo */
+    bool menziona_data = b->date_used;
 
     if (b->tip_idx == NO_POS) {
         sb_append(&mot, "nessun commit raggiungibile da questo riferimento");
@@ -757,40 +848,10 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
              * commit e' nella sua regione propria) e' il padre naturale; se
              * nessuno lo possiede, unico candidato; altrimenti l'unico a monte
              * di tutti; altrimenti ambiguo. */
-            size_t chosen = NO_POS;
-            size_t count = 0;
             bool by_owner = false;
-            if (b->f != NO_POS && ctx->owner[b->f] != NO_POS) {
-                for (size_t i = 0; i < b->cand_count; i++) {
-                    if (b->cand[i] == ctx->owner[b->f]) {
-                        chosen = b->cand[i];
-                        count++;
-                    }
-                }
-                by_owner = (count == 1);
-            }
-            if (!by_owner && b->cand_count == 1) {
-                chosen = b->cand[0];
-                count = 1;
-            }
-            if (!by_owner && count != 1 && b->cand_count > 1) {
-                count = 0;
-                for (size_t i = 0; i < b->cand_count; i++) {
-                    const Family *c = &ctx->families[b->cand[i]];
-                    bool ok = true;
-                    for (size_t j = 0; j < b->cand_count && ok; j++) {
-                        if (i == j)
-                            continue;
-                        const Family *o = &ctx->families[b->cand[j]];
-                        if (!bitset_test(o->reach, c->tip_idx))
-                            ok = false;
-                    }
-                    if (ok) {
-                        chosen = b->cand[i];
-                        count++;
-                    }
-                }
-            }
+            size_t count = 0;
+            size_t chosen = select_parent_family(ctx, b, b->cand, b->cand_count,
+                                                 &by_owner, &count);
             const char *chosen_name =
                 (chosen != NO_POS) ? family_local_name(ctx, &ctx->families[chosen]) : NULL;
             if (count == 1 && chosen_name) {
@@ -829,9 +890,38 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
         }
     }
 
+    /* La menzione della data compare solo se l'ordinamento per data ha cambiato
+     * davvero l'esito: si ricalcolano i candidati senza la regola D5 e si
+     * confronta la scelta. Se il risultato sarebbe stato lo stesso, la frase
+     * sarebbe fuorviante (su branch1, per esempio, il candidato scartato non
+     * avrebbe cambiato nulla e la frase non compare).
+     *
+     * Il confronto e' quello che conta davvero: la regola D5 scarta sempre
+     * almeno un candidato, quindi le due liste non coincidono mai; se pero' la
+     * scelta finale resta la stessa, la data non ha deciso niente e non va
+     * dichiarata come spareggio. */
     if (b->date_used) {
-        sb_append(&mot,
-                  "; scarto dei candidati basato sulla data (poco affidabile con rebase)");
+        size_t *alt = NULL, alt_count = 0;
+        bool alt_date = false;
+        collect_candidates(ctx, fi, false, &alt, &alt_count, &alt_date);
+        bool senza_owner = false, con_owner = false;
+        size_t senza_count = 0, con_count = 0;
+        size_t senza =
+            select_parent_family(ctx, b, alt, alt_count, &senza_owner, &senza_count);
+        size_t con =
+            select_parent_family(ctx, b, b->cand, b->cand_count, &con_owner, &con_count);
+        /* stesso esito: stessa famiglia scelta, stesso numero di candidati che
+         * soddisfano la regola, stessa regola applicata e stesso ricorso al
+         * percorso dei "holder" (nessun candidato, in entrambi i casi) */
+        bool stesso_esito = (senza == con) && (senza_count == con_count) &&
+                            (senza_owner == con_owner) &&
+                            ((alt_count == 0) == (b->cand_count == 0));
+        if (stesso_esito)
+            menziona_data = false;
+        free(alt);
+    }
+    if (menziona_data) {
+        append_note(&mot, "scarto dei candidati basato sulla data (poco affidabile con rebase)");
     }
     d->motivation = mot.data;
 }
@@ -865,18 +955,24 @@ static void append_alias_note(Ctx *ctx, const Family *fam, size_t self, StrBuf *
 {
     if (fam->node_count < 2)
         return;
-    sb_append(mot, "; stessa punta di ");
+    StrBuf nomi;
+    sb_init(&nomi);
     bool first = true;
     for (size_t k = 0; k < fam->node_count; k++) {
         size_t other = fam->nodes[k];
         if (other == self)
             continue;
         if (!first)
-            sb_append(mot, ", ");
+            sb_append(&nomi, ", ");
         first = false;
-        sb_appendf(mot, "'%s'", ctx->out->branches[other].name);
+        sb_appendf(&nomi, "'%s'", ctx->out->branches[other].name);
     }
-    sb_append(mot, " (stesso padre dedotto; il nome interno e' ambiguo)");
+    char nota[512];
+    snprintf(nota, sizeof nota,
+             "stessa punta di %s (stesso padre dedotto; il nome interno e' ambiguo)",
+             nomi.data ? nomi.data : "");
+    sb_free(&nomi);
+    append_note(mot, nota);
 }
 
 static void assign_family(Ctx *ctx, size_t fi)
@@ -950,19 +1046,14 @@ static void assign_family(Ctx *ctx, size_t fi)
         sb_init(&mot);
         if (ov_parent) {
             sb_appendf(&mot, "override da graph.cfg: padre '%s'", ov_parent);
-            if (ov_note[0]) {
-                sb_append(&mot, "; ");
-                sb_append(&mot, ov_note);
-            }
+            if (ov_note[0])
+                append_note(&mot, ov_note);
             append_alias_note(ctx, fam, node, &mot);
             set_parent(n, ov_parent, PARENT_CONFIGURED, mot.data);
         } else {
             sb_append(&mot, d.motivation ? d.motivation : "");
-            if (ov_note[0]) {
-                if (mot.len)
-                    sb_append(&mot, "; ");
-                sb_append(&mot, ov_note);
-            }
+            if (ov_note[0])
+                append_note(&mot, ov_note);
             append_alias_note(ctx, fam, node, &mot);
             set_parent(n, d.parent, d.state, mot.data);
             if (d.state == PARENT_NONE && fam->tip_idx != NO_POS)

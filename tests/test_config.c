@@ -929,6 +929,85 @@ static void test_end_to_end(void)
     free(cfg_path);
 }
 
+/* Una motivazione non deve mai cominciare con "; ": il separatore non
+ * separa niente e la riga si legge come se ci fosse un testo prima.
+ *
+ * Il caso e' reale: con "[long-lived] ff" la famiglia di ff diventa tronco,
+ * quindi deduce non viene chiamata e la motivazione resta vuota; upstream/main
+ * e' nella stessa famiglia e riceve solo la nota sugli alias. */
+static void test_motivation_separator(void)
+{
+    char *cfg_path = config_path_in_repo(g_repo);
+    REQUIRE(cfg_path != NULL, "config_path_in_repo fallito");
+    const char *text = "[long-lived]\nff\nmain\n";
+    FILE *f = fopen(cfg_path, "wb");
+    REQUIRE(f != NULL, "scrittura di graph.cfg nel repo di prova fallita");
+    fwrite(text, 1, strlen(text), f);
+    fclose(f);
+
+    GitData data;
+    char err[1024];
+    REQUIRE(gitdata_load(&data, g_repo, err, sizeof err),
+            "caricamento del repo di prova fallito: %s", err);
+
+    ConfigBranch *branches =
+        xmalloc((data.ref_count ? data.ref_count : 1) * sizeof(ConfigBranch));
+    size_t n = 0;
+    for (size_t i = 0; i < data.ref_count; i++) {
+        if (data.refs[i].kind == REF_TAG)
+            continue;
+        const char *nm = data.refs[i].name;
+        const char *canon = nm;
+        if (data.refs[i].kind == REF_REMOTE_BRANCH) {
+            const char *slash = strchr(nm, '/');
+            if (slash && slash[1])
+                canon = slash + 1;
+        }
+        branches[n].name = nm;
+        branches[n].canonical = canon;
+        n++;
+    }
+    GraphConfig cfg;
+    ConfigReport rep;
+    REQUIRE(config_load(&cfg, cfg_path, branches, n, &rep, err, sizeof err),
+            "config_load di graph.cfg fallita: %s", err);
+
+    History hist;
+    REQUIRE(history_build(&hist, &data, &cfg, err, sizeof err),
+            "history_build con graph.cfg fallita");
+
+    /* nessuna motivazione comincia con "; " (ne' contiene "; ; ") */
+    for (size_t i = 0; i < hist.branch_count; i++) {
+        const char *mot = hist.branches[i].motivation;
+        CHECK(mot != NULL, "%s: motivazione assente", hist.branches[i].name);
+        if (!mot)
+            continue;
+        CHECK(mot[0] != ';', "%s: la motivazione comincia con '; '",
+              hist.branches[i].name);
+        CHECK(strstr(mot, "; ;") == NULL,
+              "%s: separatore ripetuto nella motivazione: %s", hist.branches[i].name,
+              mot);
+    }
+
+    /* il caso concreto: la nota sugli alias e' l'unico testo, quindi non ha
+     * bisogno di separatore */
+    const BranchNode *um = branch_named(&hist, "upstream/main");
+    REQUIRE(um != NULL, "upstream/main assente");
+    const char *atteso =
+        "stessa punta di 'ff' (stesso padre dedotto; il nome interno e' ambiguo)";
+    CHECK(um->motivation && strcmp(um->motivation, atteso) == 0,
+          "upstream/main: motivazione attesa \"%s\", trovata \"%s\"", atteso,
+          um->motivation ? um->motivation : "-");
+
+    history_free(&hist);
+    config_report_free(&rep);
+    config_free(&cfg);
+    free(branches);
+    gitdata_free(&data);
+    remove(cfg_path);
+    free(cfg_path);
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -953,6 +1032,7 @@ int main(int argc, char **argv)
     test_cycle_two_nodes();
     test_cycle_long_chain();
     test_cycle_multiple();
+    test_motivation_separator();
     test_end_to_end();
 
     printf("%d test superati, %d falliti\n", g_pass, g_fail);

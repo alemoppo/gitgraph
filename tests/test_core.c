@@ -5,7 +5,7 @@
  * Copre: parsing di git log/for-each-ref, ordine dei genitori, ordine
  * topologico, esclusione dello stash, tag annotati dereferenziati, regole del
  * modello dei branch (padre, stato, fork, primo commit proprio, gruppo di
- * alias, casi ambigui, spareggio per data dichiarato), precedenza degli
+ * alias, casi ambigui, motivazioni sulle date), precedenza degli
  * override (stato 'configurato'), long-lived, determinismo.
  *
  * Esce con 0 se tutti i test passano, 1 se qualcuno fallisce, 2 su errore
@@ -345,6 +345,13 @@ static int test_history_default(const GitData *data)
               strcmp(b1->first_own_commit, b1h) == 0,
           "branch1: primo commit proprio atteso B1");
     CHECK(!candidates_contain(b1, "ff"), "branch1: ff non deve essere candidato");
+    /* La frase sulla data compare solo se l'ordinamento per data ha cambiato
+     * davvero il padre scelto. Per branch1 il candidato scartato per data non
+     * avrebbe cambiato nulla (il proprietario del punto di diramazione e' gia'
+     * 'main'), quindi dichiarare uno scarto per data sarebbe fuorviante. */
+    CHECK(b1->motivation && strstr(b1->motivation, "basato sulla data") == NULL,
+          "branch1: nessuno scarto per data atteso, trovato: %s",
+          b1->motivation ? b1->motivation : "-");
 
     /* branch2: diramato da B2 lungo branch1 */
     const BranchNode *b2 = branch_named(&hist, "branch2");
@@ -406,28 +413,39 @@ static int test_history_default(const GitData *data)
               "%s: la motivazione deve dichiarare la stessa punta", amb[i]);
     }
 
-    /* spareggio sulla data: tre branch nati dallo stesso punto R; solo la
-     * struttura non distingue, quindi la data e' dichiarata come tale */
+    /* oB e oC nascono come oA dallo stesso punto R: la struttura dice gia' il
+     * padre (il punto di diramazione appartiene alla regione di oA), quindi lo
+     * scarto per data non ha deciso niente e non viene dichiarato come
+     * spareggio: la frase ci sarebbe solo se l'esito fosse diverso senza. */
     const BranchNode *oc = branch_named(&hist, "oC");
     REQUIRE(oc != NULL, "oC assente");
     CHECK(oc->state == PARENT_DEDUCED && oc->parent &&
               strcmp(oc->parent, "oA") == 0,
           "oC: padre atteso 'oA', trovato %s", oc->parent ? oc->parent : "-");
-    CHECK(oc->motivation && strstr(oc->motivation, "data"),
-          "oC: la motivazione deve dichiarare lo scarto per data");
-    CHECK(oc->motivation && strstr(oc->motivation, "rebase"),
-          "oC: la motivazione deve avvertire sull'affidabilita' delle date");
+    CHECK(oc->motivation && strstr(oc->motivation, "basato sulla data") == NULL,
+          "oC: nessuno scarto per data atteso (il punto appartiene gia' a oA), "
+          "trovato: %s",
+          oc->motivation ? oc->motivation : "-");
 
-    /* oB nasce come oC dallo stesso punto R, che appartiene a oA: la
-     * struttura dice gia' il padre, quindi nessuno spareggio per data */
     const BranchNode *ob = branch_named(&hist, "oB");
     REQUIRE(ob != NULL, "oB assente");
     CHECK(ob->state == PARENT_DEDUCED && ob->parent &&
               strcmp(ob->parent, "oA") == 0,
           "oB: padre atteso 'oA', trovato %s", ob->parent ? ob->parent : "-");
-    CHECK(ob->motivation && !strstr(ob->motivation, "data"),
+    CHECK(ob->motivation && !strstr(ob->motivation, "basato sulla data"),
           "oB: nessuno scarto per data atteso");
 
+    /* In questo repository l'ordinamento per data non cambia mai il padre
+     * scelto (l'unico caso in cui scarta un candidato, oC, ha gia' il
+     * proprietario del punto come candidato): quindi nessuna motivazione puo'
+     * dichiarare uno scarto per data. */
+    for (size_t i = 0; i < hist.branch_count; i++) {
+        CHECK(hist.branches[i].motivation &&
+                  strstr(hist.branches[i].motivation, "basato sulla data") == NULL,
+              "%s: nessuno scarto per data atteso, trovato: %s",
+              hist.branches[i].name,
+              hist.branches[i].motivation ? hist.branches[i].motivation : "-");
+    }
     const BranchNode *oa = branch_named(&hist, "oA");
     REQUIRE(oa != NULL, "oA assente");
     CHECK(oa->state == PARENT_NONE && oa->parent == NULL,

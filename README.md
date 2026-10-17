@@ -168,8 +168,11 @@ padre, stato e motivazione. `--full` mostra i messaggi di commit completi.
 - **Long-lived**: sono il tronco o le linee principali; non hanno padre
   dedotto, ne' punto di diramazione, ne' candidati.
 - **Date**: usate solo come spareggio quando la struttura non decide (per
-  esempio fra diramazioni nate dallo stesso commit); ogni decisione basata su
-  una data dichiara nella motivazione che e' poco affidabile con rebase.
+  esempio fra diramazioni nate dallo stesso commit). La motivazione dichiara
+  lo scarto per data, avvertendo che e' poco affidabile con rebase, **solo se
+  l'ordinamento per data ha cambiato davvero il risultato**: se il padre
+  sarebbe stato lo stesso senza, la frase non compare, perche' allora la data
+  non ha deciso niente.
 - Dettagli e dimostrazione dei filtri: `src/history.h` e l'intestazione di
   `src/history.c`.
 
@@ -203,8 +206,9 @@ Dieci test, nessuno con finestra:
 
 1. `make_test_repo` genera il repository di prova (la fixture rimuove prima la
    cartella dei repository di test, dentro la build);
-2. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
-   per data, override, long-lived, determinismo, quoting degli argomenti,
+2. `core` verifica parsing, topologia, modello dei branch, alias, motivazioni
+   (in particolare quando la frase sulla data puo' comparire e quando non deve),
+   override, long-lived, determinismo, quoting degli argomenti,
    cattura di stdout/stderr senza blocco (pipe riempite oltre la capacità,
    entrambe le pipe attive contemporaneamente, uscita non zero e fallimento
    della creazione dei thread di lettura) e sicurezza della ricerca di git:
@@ -219,7 +223,8 @@ Dieci test, nessuno con finestra:
    che lo lasciano valido, cicli di override (nessuno, due nodi, catena lunga,
    cicli distinti, ciascuno segnalato una volta) e uso end-to-end dentro il
    repository di prova (override → stato `configurato`, long-lived senza fork
-   né candidati, remoto con punta diversa che mantiene la genealogia dedotta);
+   né candidati, remoto con punta diversa che mantiene la genealogia dedotta) e
+   motivazioni che non cominciano mai con un separatore "; " senza testo prima;
 4. `dump_smoke` esegue lo strumento di dump;
 5. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
    3 s;
@@ -238,7 +243,7 @@ costruzione del modello, non la generazione.
 
 Il repository di prova contiene: merge `--no-ff`, fast-forward, branch
 cancellato, gruppo di alias (piu' branch sullo stesso commit) e un branch
-figlio ambiguo tra i membri del gruppo, gruppo isolato con spareggio per data,
+figlio ambiguo tra i membri del gruppo, gruppo isolato con date come spareggio
 riferimenti remoti con punte diverse (`origin/main`, `upstream/main`) piu' uno
 specchio provato e un alias con nome diverso, ramo nato dal **secondo
 genitore** di un merge, merge ripetuti dello stesso branch, storia **ribasata**
