@@ -6,8 +6,8 @@
 # Lancia tests/make_test_repo.bat passando la directory del repo di prova tramite
 # la variabile d'ambiente GG_TEST_REPO. Passare da uno script CMake evita del
 # tutto le bizzarrie di quoting di "cmd /c" quando ctest lancia direttamente un
-# file .bat. Gitgraph e' supportato solo su Windows: tests/make_test_repo.sh e' il
-# gemello POSIX mantenuto per un eventuale porting e non viene eseguito qui.
+# file .bat. Gitgraph e' supportato solo su Windows: fuori da qui la generazione
+# del repository di prova non e' prevista.
 
 foreach(v GG_TEST_REPO GG_SOURCE_DIR)
     if(NOT DEFINED ${v})

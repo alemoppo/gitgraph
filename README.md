@@ -31,8 +31,6 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
 (`CreateProcessW`, pipe, thread) e gli script di test invocano `cmd.exe`:
 non c'è un porting per Linux/macOS e il tentativo di compilare altrove viene
 fermato subito da CMake con un messaggio esplicito.
-`tests/make_test_repo.sh` è il gemello POSIX di `make_test_repo.bat`, mantenuto
-allineato per un eventuale porting: non viene eseguito dalla suite.
 
 - Windows con Git nel PATH.
 - Un compilatore C11 e CMake >= 3.16.
@@ -250,9 +248,9 @@ genitore** di un merge, merge ripetuti dello stesso branch, storia **ribasata**
 condivisi (genealogia non determinabile), branch con slash, tag annotati e
 leggeri multipli, uno stash (da escludere) e un messaggio UTF-8 multi-riga.
 
-Gli script `make_test_repo.bat` / `.sh` accettano come destinazione **solo**
-directory di test dedicate e cancellano **solo** quelle. Tutte queste
-condizioni devono valere, altrimenti lo script fallisce senza toccare nulla:
+Lo script `make_test_repo.bat` accetta come destinazione **solo** directory di
+test dedicate e cancella **solo** quelle. Tutte queste condizioni devono
+valere, altrimenti lo script fallisce senza toccare nulla:
 
 - il percorso non contiene `.` o `..` (nessuna risoluzione ambigua);
 - il nome finale è `gitgraph_test_repo` oppure `gitgraph_test_repo_<scenario>`
