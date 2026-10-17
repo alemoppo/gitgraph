@@ -27,7 +27,14 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
 
 ## Requisiti
 
-- Git nel PATH.
+**Piattaforma: solo Windows.** `src/gitdata.c` usa le API Win32
+(`CreateProcessW`, pipe, thread) e gli script di test invocano `cmd.exe`:
+non c'è un porting per Linux/macOS e il tentativo di compilare altrove viene
+fermato subito da CMake con un messaggio esplicito.
+`tests/make_test_repo.sh` è il gemello POSIX di `make_test_repo.bat`, mantenuto
+allineato per un eventuale porting: non viene eseguito dalla suite.
+
+- Windows con Git nel PATH.
 - Un compilatore C11 e CMake >= 3.16.
 - Per la GUI (dalle fasi successive): SDL3 e SDL3_ttf.
 
@@ -66,14 +73,22 @@ Commenti su righe dedicate (`#` o `;`), sezioni nell'ordine che si preferisce,
 # trunk e linee principali, nell'ordine di gerarchia
 [long-lived]
 main
-release/hotfix-*     # con piu' righe che corrispondono, vale la prima
-release/*            # '*' = qualsiasi sequenza di caratteri, '/' compreso
+# con piu' righe che corrispondono allo stesso branch vale la prima
+release/hotfix-*
+# '*' = qualsiasi sequenza di caratteri, '/' compreso
+release/*
 
 [parents]
-feature/x = main   # dichiarazioni esplicite, senza wildcard
+# dichiarazioni esplicite, senza wildcard
+feature/x = main
 bugfix/1 = release/1.0
 ```
 
+- **Commenti**: solo su righe dedicate, con `#` o `;` a inizio riga. Dentro
+  una riga di dati `#` e `;` fanno parte del valore, perché i nomi di
+  riferimento Git possono contenerli: `feat#1 = main` vale come override di
+  `feat#1`. Di conseguenza `main # nota` **non** vale come `main`: viene
+  segnalato come nome non valido, senza troncare il valore.
 - **`[long-lived]`**: righe di nomi o di pattern, nell'ordine di gerarchia
   usato dal modello e dal layout. L'unico carattere speciale è `*`, che sta
   per "qualsiasi sequenza di caratteri": nei nomi dei branch la barra non è
@@ -97,13 +112,17 @@ bugfix/1 = release/1.0
 
 **Validazione**: un errore rifiuta il file per intero (niente
 configurazione a metà) e lo strumento ripiega sul tronco implicito; un
-avviso lascia applicare il file. Sono errori: sezione sconosciuta, riga fuori
+avviso lascia applicare il file. Anche un file **presente ma non
+leggibile** (permessi, una directory al suo posto, errore di lettura) viene
+rifiutato con un messaggio che lo dice: un file assente, invece, non è un
+errore e non produce diagnostica. Sono errori: sezione sconosciuta, riga fuori
 da una sezione, intestazione malformata, `=` dentro `[long-lived]`, riga senza
 `=` o con un nome mancante in `[parents]`, wildcard in `[parents]`, nome non
 valido come riferimento Git, padre uguale al branch, doppio override per lo
 stesso branch. Sono avvisi: nome che non esiste nel repository, pattern senza
-corrispondenze, voce già long-lived, ciclo di override (in fase di modello i
-branch coinvolti diventano ambigui).
+corrispondenze, voce già long-lived, ciclo di override (ogni ciclo è
+segnalato una volta sola, con i nomi dei branch coinvolti; in fase di modello
+i branch coinvolti diventano ambigui).
 
 `gitgraph_dump` stampa in testa l'ordine long-lived e gli override applicati,
 e la diagnostica su stderr.
@@ -182,25 +201,35 @@ costruzione del modello).
 
     ctest --test-dir build --output-on-failure
 
-Dieci test, nessuno con finestra:
+Undici test, nessuno con finestra:
 
 1. `make_test_repo` genera il repository di prova;
-2. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
+2. `scripts_guard` verifica le protezioni di `make_test_repo.bat`: nome della
+   directory non ammesso, suffisso di scenario ammesso, directory estranea che
+   contiene il marcatore, marcatore con testo diverso, directory di test con
+   file estranei, percorsi con `.` e `..`, radice del filesystem, argomento
+   vuoto e rigenerazione normale. Tutto avviene in una sandbox sotto `build/`;
+3. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
    per data, override, long-lived, determinismo, quoting degli argomenti e
-   cattura di stdout/stderr senza blocco (pipe riempite oltre la capacita');
-3. `config` verifica `graph.cfg`: sezioni, commenti, BOM/CRLF, wildcard con
-   ordine naturale, barra attraversata, priorita' della prima riga che
-   corrisponde, riferimenti remoti per nome canonico, tronco implicito, casi di
-   errore che rifiutano il file, avvisi che lo lasciano valido, ciclo di
-   override e uso end-to-end dentro il repository di prova (override → stato
-   `configurato`, long-lived senza fork né candidati, remoto con punta diversa
-   che mantiene la genealogia dedotta);
-4. `dump_smoke` esegue lo strumento di dump;
-5. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
+   cattura di stdout/stderr senza blocco (pipe riempite oltre la capacita',
+   entrambe le pipe attive contemporaneamente, uscita non zero e fallimento
+   della creazione dei thread di lettura);
+4. `config` verifica `graph.cfg`: sezioni, commenti su righe dedicate, `#` e
+   `;` dentro i nomi, BOM/CRLF, wildcard con ordine naturale, barra
+   attraversata, priorita' della prima riga che corrisponde, riferimenti remoti
+   per nome canonico, tronco implicito, validazione dei nomi di riferimento
+   (comprese le lunghezze attorno al suffisso `.lock`), file assente/illeggibile
+   (directory al suo posto)/vuoto, casi di errore che rifiutano il file, avvisi
+   che lo lasciano valido, cicli di override (nessuno, due nodi, catena lunga,
+   cicli distinti, ciascuno segnalato una volta) e uso end-to-end dentro il
+   repository di prova (override → stato `configurato`, long-lived senza fork
+   né candidati, remoto con punta diversa che mantiene la genealogia dedotta);
+5. `dump_smoke` esegue lo strumento di dump;
+6. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
    3 s;
-6. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
+7. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
    30 s (determinismo verificato anche sul repository grande);
-7. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
+8. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
    15 s, con ogni branch nato dal precedente (catena profonda): verifica il
    controllo delle relazioni circolari e l'ordinamento dei padri.
 
@@ -221,7 +250,19 @@ genitore** di un merge, merge ripetuti dello stesso branch, storia **ribasata**
 condivisi (genealogia non determinabile), branch con slash, tag annotati e
 leggeri multipli, uno stash (da escludere) e un messaggio UTF-8 multi-riga.
 
-Gli script `make_test_repo.bat` / `.sh` cancellano **solo** directory che
-hanno creato loro, riconosciute dal marcatore `.gitgraph_test_repo`: una
-directory esistente senza marcatore, la radice del filesystem, la home, la
-directory corrente e quella temporanea vengono rifiutate senza toccare nulla.
+Gli script `make_test_repo.bat` / `.sh` accettano come destinazione **solo**
+directory di test dedicate e cancellano **solo** quelle. Tutte queste
+condizioni devono valere, altrimenti lo script fallisce senza toccare nulla:
+
+- il percorso non contiene `.` o `..` (nessuna risoluzione ambigua);
+- il nome finale è `gitgraph_test_repo` oppure `gitgraph_test_repo_<scenario>`
+  (whitelist: nessuna directory arbitraria può essere cancellata);
+- il percorso non è la radice del filesystem, la directory corrente, la home
+  o quella temporanea;
+- se la directory esiste, contiene il marcatore `.gitgraph_test_repo` con il
+  testo esatto `gitgraph test repository` e nessun file diverso da quelli
+  creati dallo script (`.git`, `hello.txt`, `wip.txt`, `msg-c.txt`).
+
+Il solo marcatore non autorizza nessuna cancellazione: è una delle condizioni,
+non un suffisso sufficiente. Le verifiche sono coperte dal test
+`scripts_guard`, che lavora solo dentro `build/guard_sandbox`.
