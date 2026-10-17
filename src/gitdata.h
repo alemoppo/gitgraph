@@ -25,6 +25,14 @@ typedef struct {
     char *message;   /* messaggio completo, multi-riga, UTF-8 */
 } GitCommit;
 
+/* Voce di PATH da considerare alla ricerca di git.exe: deve essere assoluta
+ * (mai vuota, mai ".", mai relativa, mai la directory corrente) e senza
+ * virgolette ai bordi. Esposta perche' i test la provano direttamente, senza
+ * dipendere dalla cache della ricerca (che vale una volta sola per processo).
+ * Se usable_len non e' NULL riceve la lunghezza della parte utile. */
+bool git_path_entry_is_usable(const wchar_t *entry, size_t entry_len,
+                               size_t *usable_len);
+
 typedef enum {
     REF_LOCAL_BRANCH,
     REF_REMOTE_BRANCH,

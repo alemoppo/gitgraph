@@ -191,13 +191,28 @@ static void reap_child(PROCESS_INFORMATION *pi)
 static char g_git_path[MAX_PATH];
 static bool g_git_searched;
 
-/* Voce di PATH da considerare? Assoluta, non vuota, non "." e non ".." */
-static bool path_entry_is_usable(const wchar_t *entry)
+bool git_path_entry_is_usable(const wchar_t *entry, size_t entry_len,
+                               size_t *usable_len)
 {
-    if (entry[0] == L'\0' || entry[0] == L'.')
-        return false;
-    if (entry[0] == L'\\' && entry[1] == L'\\')
+    /* virgolette ai bordi: alcuni installer scrivono il proprio path come
+     * "C:\Program Files\Git\cmd". Non sono parte del percorso, sono solo
+     * comodo: vanno tolte prima di giudicare la voce e prima di costruire il
+     * nome del file da cercare. */
+    size_t len = entry_len;
+    if (len > 0 && entry[0] == L'"') {
+        entry++;
+        len--;
+    }
+    while (len > 0 && (entry[len - 1] == L'"' || entry[len - 1] == L' '))
+        len--;
+    if (usable_len)
+        *usable_len = len;
+    if (len == 0 || entry[0] == L'.')
+        return false; /* vuota, "." o ".." */
+    if (entry[0] == L'\\' && len > 1 && entry[1] == L'\\')
         return true; /* percorso UNC: assoluto */
+    if (len < 3)
+        return false;
     return (entry[1] == L':' && (entry[2] == L'\\' || entry[2] == L'/'));
 }
 
@@ -223,12 +238,14 @@ static bool resolve_git_path(char *out, size_t out_size)
     while (*p) {
         const wchar_t *sep = wcschr(p, L';');
         size_t len = sep ? (size_t)(sep - p) : wcslen(p);
-        if (len > 0 && len < MAX_PATH && path_entry_is_usable(p)) {
+        size_t usable = 0;
+        if (len > 0 && len < MAX_PATH &&
+            git_path_entry_is_usable(p, len, &usable)) {
             wchar_t candidate[MAX_PATH];
-            /* len + "\git.exe" + NUL */
-            if (len + 9 < MAX_PATH) {
-                memcpy(candidate, p, len * sizeof(wchar_t));
-                memcpy(candidate + len, L"\\git.exe", 9 * sizeof(wchar_t));
+            /* usable + "\git.exe" + NUL */
+            if (usable + 9 < MAX_PATH) {
+                memcpy(candidate, p, usable * sizeof(wchar_t));
+                memcpy(candidate + usable, L"\\git.exe", 9 * sizeof(wchar_t));
                 DWORD attr = GetFileAttributesW(candidate);
                 if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
                     char *utf8 = wide_to_utf8(candidate);

@@ -989,6 +989,51 @@ static void test_git_lookup_safety(const char *fake_git_path, const char *repo_p
     RemoveDirectoryA(work);
 }
 
+/* Scelta delle voci del PATH per git.exe.
+ *
+ * La funzione e' provata qui direttamente: la ricerca vera e' memorizzata dopo
+ * la prima chiamata (il processo non deve ripeterla), quindi un test che la
+ * richiamasse non potrebbe provarle piu' di una volta. */
+static void check_entry(const wchar_t *entry, bool atteso, size_t attesa_len)
+{
+    size_t len = 12345;
+    bool ok = git_path_entry_is_usable(entry, wcslen(entry), &len);
+    CHECK(ok == atteso, "voce '%ls': atteso %s, trovato %s", entry,
+          atteso ? "utilizzabile" : "scartata", ok ? "utilizzabile" : "scartata");
+    if (ok == atteso && attesa_len != 12345)
+        CHECK(len == attesa_len, "voce '%ls': lunghezza utile attesa %zu, trovata %zu",
+              entry, attesa_len, len);
+}
+
+static void test_path_entry_selection(void)
+{
+    /* scartate: vuota, punto, punto due, voce relativa */
+    check_entry(L"", false, 0);
+    check_entry(L".", false, 1);
+    check_entry(L"..", false, 2);
+    check_entry(L"rel\\dir", false, 7);
+    check_entry(L"bin", false, 3);
+    /* non sono assolute: drive senza barra */
+    check_entry(L"C:", false, 2);
+    check_entry(L"C:rel\\dir", false, 9);
+    /* assolute */
+    check_entry(L"C:\\", true, 3);
+    check_entry(L"C:\\Program Files\\Git\\cmd", true, 24);
+    check_entry(L"D:/tools/git", true, 12);
+    /* UNC: assoluta anche senza lettera di drive */
+    check_entry(L"\\\\server\\share", true, 14);
+    check_entry(L"\\\\server\\share\\", true, 15);
+    /* virgolette ai bordi: alcuni installer le mettono, non sono parte del
+     * percorso e la voce resta utilizzabile, con la lunghezza utile */
+    check_entry(L"\"C:\\Program Files\\Git\\cmd\"", true, 24);
+    check_entry(L"\"\\\\server\\share\"", true, 14);
+    /* virgolette ma voce non assoluta: resta scartata */
+    check_entry(L"\".\"", false, 1);
+    check_entry(L"\"rel\\dir\"", false, 7);
+    /* solo virgolette: voce vuota */
+    check_entry(L"\"\"", false, 0);
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -1029,6 +1074,7 @@ int main(int argc, char **argv)
     rc |= test_long_lived_custom(&data);
     test_cmdline_quoting();
     test_pipe_capture();
+    test_path_entry_selection();
     test_git_lookup_safety(fake_git, argv[1]);
     test_implicit_trunk_helper();
 
