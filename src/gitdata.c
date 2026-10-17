@@ -21,7 +21,10 @@
 /* ---------- esecuzione di processi ---------- */
 
 /* Accoda un argomento alla command line, applicando le regole di quoting
- * del runtime C di Windows. */
+ * del runtime C di Windows: le barre inverse prima di una virgoletta (o prima
+ * della virgoletta di chiusura) vengono raddoppiate, cosi' un percorso che
+ * termina con "\" non "mangia" la virgoletta. Gli argomenti vuoti sono
+ * quotati; il resto passa invariato. */
 static void append_arg(StrBuf *sb, const char *arg)
 {
     if (sb->len)
@@ -61,6 +64,16 @@ static void append_arg(StrBuf *sb, const char *arg)
     sb_append(sb, "\"");
 }
 
+void gitdata_build_cmdline(const char *const *argv, char *out, size_t out_size)
+{
+    StrBuf sb;
+    sb_init(&sb);
+    for (size_t i = 0; argv[i]; i++)
+        append_arg(&sb, argv[i]);
+    snprintf(out, out_size, "%s", sb.data);
+    sb_free(&sb);
+}
+
 static wchar_t *utf8_to_wide(const char *s)
 {
     int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
@@ -81,31 +94,34 @@ static char *wide_to_utf8(const wchar_t *w)
     return s;
 }
 
-/* Legge tutto il contenuto gia' disponibile di una pipe senza bloccarsi.
- * Ritorna false quando la pipe e' chiusa (EOF definitivo). */
-static bool drain_available(HANDLE h, StrBuf *out)
+/* Thread di lettura: consuma una pipe fino alla chiusura. Con un thread per
+ * pipe non esiste attesa reciproca: se una pipe si riempie mentre l'altra
+ * viene letta, l'altra la drena subito, quindi il figlio non si blocca mai in
+ * scrittura (il classico deadlock delle due pipe). */
+typedef struct {
+    HANDLE pipe;
+    StrBuf *out;
+} PipeReader;
+
+static DWORD WINAPI pipe_reader(LPVOID param)
 {
+    PipeReader *r = (PipeReader *)param;
     for (;;) {
-        DWORD avail = 0;
-        if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL))
-            return false; /* broken pipe: scrittore chiuso e buffer vuoto */
-        if (avail == 0)
-            return true; /* ancora aperta, niente dati pronti */
         char tmp[65536];
-        DWORD want = avail < sizeof tmp ? avail : (DWORD)sizeof tmp;
         DWORD got = 0;
-        if (!ReadFile(h, tmp, want, &got, NULL) || got == 0)
-            return false;
-        sb_appendn(out, tmp, got);
+        if (!ReadFile(r->pipe, tmp, sizeof tmp, &got, NULL) || got == 0)
+            break;
+        sb_appendn(r->out, tmp, got);
     }
+    return 0;
 }
 
 /* Esegue `argv` (argv[0] = programma, es. "git"; terminato da NULL).
  * Cattura stdout e stderr. Ritorna false solo se il processo non e' partito
  * o la lettura e' fallita; il codice di uscita del processo finisce in
  * exit_code. */
-static bool run_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
-                        int *exit_code, char *err, size_t err_size)
+bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
+                     int *exit_code, char *err, size_t err_size)
 {
     StrBuf cmdline;
     sb_init(&cmdline);
@@ -162,32 +178,33 @@ static bool run_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
         return false;
     }
 
-    /* Lettura delle due pipe. Su stdout si usa una lettura bloccante: e' il
-     * percorso veloce (nessuna attesa a vuoto, il buffer della pipe non
-     * limita il throughput); stderr viene sempre svuotata prima, per non
-     * lasciare git bloccato se scrive li'. */
-    bool out_done = false, err_done = false;
-    while (!out_done || !err_done) {
-        if (!err_done)
-            err_done = !drain_available(err_r, errout);
-        if (!out_done) {
-            char tmp[65536];
-            DWORD got = 0;
-            if (!ReadFile(out_r, tmp, sizeof tmp, &got, NULL) || got == 0)
-                out_done = true;
-            else
-                sb_appendn(out, tmp, got);
-            continue; /* ricontrolla stderr */
+    /* Un thread per pipe: nessuna attesa reciproca, quindi nessun blocco
+     * quando una delle due pipe si riempie. */
+    PipeReader ro = { out_r, out };
+    PipeReader re = { err_r, errout };
+    HANDLE to = CreateThread(NULL, 0, pipe_reader, &ro, 0, NULL);
+    HANDLE te = CreateThread(NULL, 0, pipe_reader, &re, 0, NULL);
+    if (to && te) {
+        HANDLE both[2] = { to, te };
+        WaitForMultipleObjects(2, both, TRUE, INFINITE);
+    } else {
+        /* fallback senza thread: lettura sequenziale (le pipe sono piccole in
+         * questo caso, il figlio non e' bloccato) */
+        if (to) {
+            WaitForSingleObject(to, INFINITE);
+        } else {
+            pipe_reader(&ro);
         }
-        if (!err_done) {
-            char tmp[65536];
-            DWORD got = 0;
-            if (!ReadFile(err_r, tmp, sizeof tmp, &got, NULL) || got == 0)
-                err_done = true;
-            else
-                sb_appendn(errout, tmp, got);
+        if (te) {
+            WaitForSingleObject(te, INFINITE);
+        } else {
+            pipe_reader(&re);
         }
     }
+    if (to)
+        CloseHandle(to);
+    if (te)
+        CloseHandle(te);
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
@@ -210,7 +227,7 @@ static bool run_git(const char *const *args, StrBuf *out, StrBuf *errout,
     for (size_t i = 0; args[i] && n < 62; i++)
         argv[n++] = args[i];
     argv[n] = NULL;
-    return run_capture(argv, out, errout, exit_code, err, err_size);
+    return gitdata_capture(argv, out, errout, exit_code, err, err_size);
 }
 
 /* Prima riga non vuota di un buffer, ripulita per il messaggio d'errore. */

@@ -107,18 +107,42 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* configurazione implicita (fase 1: nessun file); il tronco e' main/master */
+    /* configurazione: graph.cfg nella radice del repository, se presente;
+     * altrimenti il solo tronco implicito (main/master) */
     {
-        char **names = xmalloc((data.ref_count ? data.ref_count : 1) * sizeof(char *));
+        ConfigBranch *branches =
+            xmalloc((data.ref_count ? data.ref_count : 1) * sizeof(ConfigBranch));
         size_t n = 0;
         for (size_t i = 0; i < data.ref_count; i++) {
-            if (data.refs[i].kind == REF_LOCAL_BRANCH)
-                names[n++] = data.refs[i].name;
+            if (data.refs[i].kind == REF_TAG)
+                continue;
+            const char *name = data.refs[i].name;
+            const char *canonical = name;
+            if (data.refs[i].kind == REF_REMOTE_BRANCH) {
+                const char *slash = strchr(name, '/');
+                if (slash && slash[1])
+                    canonical = slash + 1;
+            }
+            branches[n].name = name;
+            branches[n].canonical = canonical;
+            n++;
         }
+        char *cfg_path = config_path_in_repo(data.repo_path);
+        ConfigReport report;
+        char cfg_err[1024];
         GraphConfig cfg;
-        memset(&cfg, 0, sizeof cfg);
-        config_set_implicit_trunk(&cfg, names, n);
-        free(names);
+        bool cfg_ok = config_load(&cfg, cfg_path, branches, n, &report, cfg_err,
+                                  sizeof cfg_err);
+        for (size_t i = 0; i < report.count; i++)
+            fprintf(stderr, "%s: %s\n",
+                    report.items[i].level == CONFIG_DIAG_ERROR ? "errore"
+                                                                : "avviso",
+                    report.items[i].text);
+        if (!cfg_ok)
+            fprintf(stderr, "%s: configurazione ignorata\n", cfg_err);
+        free(cfg_path);
+        config_report_free(&report);
+        free(branches);
 
         History hist;
         if (!history_build(&hist, &data, &cfg, err, sizeof err)) {
@@ -134,6 +158,15 @@ int main(int argc, char **argv)
         else
             printf("branch corrente: (HEAD scollegata)\n");
         printf("commit: %zu  riferimenti: %zu\n", data.commit_count, data.ref_count);
+        if (cfg.long_lived_count > 0) {
+            printf("long-lived (ordine di gerarchia):");
+            for (size_t i = 0; i < cfg.long_lived_count; i++)
+                printf(" %s", cfg.long_lived[i]);
+            printf("%s\n", cfg.long_lived_explicit ? "" : "  (tronco implicito)");
+        }
+        for (size_t i = 0; i < cfg.override_count; i++)
+            printf("override [parents]: %s = %s\n", cfg.overrides[i].branch,
+                   cfg.overrides[i].parent);
         printf("\n");
 
         printf("RIFERIMENTI\n");
@@ -221,9 +254,12 @@ int main(int argc, char **argv)
                 gitdata_short_hash(b->fork_hash, 8, fork);
             printf("  %-20s %s\n", b->name,
                    b->is_head ? "(HEAD)" : (b->mirror_of ? "(specchio)" : ""));
-            printf("      tipo: %s%s   padre: %-16s stato: %-11s fork: %s\n",
+            char tip[16] = "-";
+            if (b->tip_pos != (size_t)-1)
+                gitdata_short_hash(data.commits[b->tip_pos].hash, 8, tip);
+            printf("      tipo: %s%s   punta: %-8s padre: %-16s stato: %-11s fork: %s\n",
                    b->is_remote ? "remote" : "locale",
-                   b->is_long_lived ? " long-lived" : "",
+                   b->is_long_lived ? " long-lived" : "", tip,
                    b->parent ? b->parent : "-",
                    state_name(b->state), fork);
             if (b->first_own_commit) {
@@ -232,11 +268,13 @@ int main(int argc, char **argv)
                 printf("      primo commit proprio: %s\n", fh);
             }
             if (b->alias_count > 0) {
-                printf("      alias:");
+                printf("      stessa punta di:");
                 for (size_t k = 0; k < b->alias_count; k++)
                     printf(" %s", b->alias_members[k]);
                 printf("\n");
             }
+            if (b->genealogy_undetermined)
+                printf("      genealogia: NON DETERMINABILE dalla storia\n");
             printf("      motivo: %s\n", b->motivation);
             if (b->candidate_count > 0) {
                 printf("      candidati:");

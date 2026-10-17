@@ -60,6 +60,19 @@ void gitdata_free(GitData *data);
  * costruita al caricamento. */
 size_t gitdata_find_commit(const GitData *d, const char *hash);
 
+/* ---- ausiliari esposti per i test ---- */
+
+/* Compone la riga di comando per un argv (terminato da NULL) con le regole di
+ * quoting del runtime C di Windows. `out` riceve almeno NUL. */
+void gitdata_build_cmdline(const char *const *argv, char *out, size_t out_size);
+
+/* Esegue un programma catturando stdout e stderr in due buffer distinti, senza
+ * shell. La lettura avviene con un thread per pipe: una pipe piena non puo'
+ * bloccare il figlio (e quindi non puo' bloccare chi legge). `err` riceve un
+ * messaggio solo se il processo non e' partito. Ritorna false in quel caso. */
+bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
+                     int *exit_code, char *err, size_t err_size);
+
 /* Helper di visualizzazione: copia i primi n caratteri dell'hash. */
 void gitdata_short_hash(const char *hash, size_t n, char out[16]);
 

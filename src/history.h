@@ -32,9 +32,14 @@ typedef enum {
 
 typedef struct {
     char *name;          /* nome breve del branch ("main", "origin/main") */
-    char *canonical;     /* nome canonico del gruppo (es. "feature/x") */
-    char *mirror_of;     /* se remote-tracking di un altro branch, il suo nome */
+    char *canonical;     /* nome canonico (per un remoto: nome senza remote) */
+    char *mirror_of;     /* remote-tracking che punta allo STESSO commit di un
+                             altro branch ("origin/main" == "main"); nomi
+                             uguali con punte diverse non bastano */
     size_t ref_index;    /* indice in GitData.refs */
+    size_t tip_pos;      /* indice del commit realmente puntato, SIZE_MAX se
+                             fuori dal log: ogni riferimento conserva la sua
+                             punta, anche quando i nomi coincidono */
     bool is_remote;      /* true per i branch remoti */
     bool is_head;        /* branch corrente */
     bool is_long_lived;
@@ -45,6 +50,9 @@ typedef struct {
     char *parent;         /* nome del branch padre, o NULL */
     ParentState state;
     char *motivation;     /* spiegazione leggibile, mai NULL */
+    bool genealogy_undetermined; /* nessun branch padre deducibile: la
+                                     genealogia non e' ricavabile dalla
+                                     storia (dichiarato anche nel motivo) */
 
     char *fork_hash;      /* hash completo del punto di diramazione, o NULL */
     size_t fork_pos;      /* posizione topologica del fork (0 = piu' recente),
@@ -54,8 +62,9 @@ typedef struct {
                                per l'ordinamento dei figli nel layout), o NULL */
     size_t first_own_pos;   /* posizione topologica, SIZE_MAX se nessuno */
 
-    char **alias_members; /* altri branch (nomi) sulla stessa punta: un unico
-                             gruppo di alias, in ordine alfabetico */
+    char **alias_members; /* altri riferimenti (nomi) sulla stessa punta: la
+                             stessa genealogia, quindi lo stesso padre dedotto;
+                             in ordine alfabetico */
     size_t alias_count;
 
     char **candidates;    /* candidati (ordinati), solo informativo */

@@ -137,6 +137,9 @@ static void compare_histories(const History *a, const History *b)
         for (size_t k = 0; k < x->alias_count && k < y->alias_count; k++)
             CHECK(strcmp(x->alias_members[k], y->alias_members[k]) == 0,
                   "determinismo: alias di '%s'", x->name);
+        CHECK(x->tip_pos == y->tip_pos, "determinismo: punta di '%s'", x->name);
+        CHECK(x->genealogy_undetermined == y->genealogy_undetermined,
+              "determinismo: genealogia di '%s'", x->name);
     }
 }
 
@@ -144,11 +147,10 @@ static void compare_histories(const History *a, const History *b)
 
 static int test_gitdata(const GitData *d)
 {
-    /* il repo di prova: 22 commit, 18 riferimenti (13 branch incl.
-     * origin/main, 5 tag) */
-    CHECK(d->commit_count == 22, "commit_count = %zu, atteso 22",
+    /* il repo di prova: 31 commit, 28 riferimenti (21 branch, 7 tag; lo stash e' escluso) */
+    CHECK(d->commit_count == 31, "commit_count = %zu, atteso 31",
           d->commit_count);
-    CHECK(d->ref_count == 18, "ref_count = %zu, atteso 18", d->ref_count);
+    CHECK(d->ref_count == 28, "ref_count = %zu, atteso 28", d->ref_count);
     REQUIRE(d->head_branch != NULL, "HEAD scollegata nel repo di test");
     CHECK(strcmp(d->head_branch, "main") == 0, "head_branch = %s",
           d->head_branch);
@@ -245,11 +247,30 @@ static int test_gitdata(const GitData *d)
     CHECK(dh && strcmp(tip->target, dh) == 0, "tip-lw non punta a D");
     CHECK(strcmp(v10->full_name, "refs/tags/v1.0") == 0, "full_name di v1.0");
 
-    /* remote-tracking speculare a main */
+    /* remote-tracking con punte diverse (stesso nome canonico di main) */
     const GitRef *om = ref_named(d, "origin/main");
-    REQUIRE(om != NULL, "origin/main assente");
+    const GitRef *um = ref_named(d, "upstream/main");
+    const GitRef *ob1 = ref_named(d, "origin/branch1");
+    const GitRef *ofx = ref_named(d, "origin/feature-x");
+    REQUIRE(om && um && ob1 && ofx, "riferimenti remoti assenti");
     CHECK(om->kind == REF_REMOTE_BRANCH, "origin/main: tipo errato");
-    CHECK(dh && strcmp(om->target, dh) == 0, "origin/main non punta a D");
+    CHECK(dh && strcmp(om->target, dh) != 0, "origin/main: punta diversa da main");
+    CHECK(um->kind == REF_REMOTE_BRANCH, "upstream/main: tipo errato");
+    CHECK(dh && strcmp(um->target, dh) != 0,
+          "upstream/main: punta diversa da main");
+    const GitRef *local_main = ref_named(d, "main");
+    const GitRef *local_b1 = ref_named(d, "branch1");
+    const GitRef *local_fx = ref_named(d, "feature/x");
+    CHECK(om->target != NULL && um->target != NULL && om->target[0] &&
+              strcmp(om->target, um->target) != 0,
+          "origin/main e upstream/main: punte diverse fra loro");
+    if (local_b1)
+        CHECK(strcmp(ob1->target, local_b1->target) == 0,
+              "origin/branch1: stessa punta di branch1");
+    if (local_fx)
+        CHECK(strcmp(ofx->target, local_fx->target) == 0,
+              "origin/feature-x: stessa punta di feature/x");
+    (void)local_main;
     return 0;
 }
 
@@ -275,8 +296,8 @@ static int test_history_default(const GitData *data)
     REQUIRE(history_build(&hist, data, &cfg, err, sizeof err),
             "history_build fallita");
 
-    /* nodi: 12 branch locali + origin/main */
-    CHECK(hist.branch_count == 13, "branch_count = %zu, atteso 13",
+    /* nodi: 17 branch locali + 4 remote-tracking */
+    CHECK(hist.branch_count == 21, "branch_count = %zu, atteso 21",
           hist.branch_count);
 
     /* ogni branch ha una motivazione non vuota */
@@ -293,16 +314,12 @@ static int test_history_default(const GitData *data)
     CHECK(main_b->is_head, "main: non marcato HEAD");
     CHECK(main_b->is_long_lived, "main: non long-lived");
 
-    /* specchio remote-tracking */
+    /* origin/main non e' piu' uno specchio: punta diversa da main (vedi i
+     * controlli sui riferimenti remoti piu' avanti) */
     const BranchNode *om = branch_named(&hist, "origin/main");
     REQUIRE(om != NULL, "origin/main assente nel modello");
     CHECK(om->is_remote, "origin/main: non remoto");
-    CHECK(om->mirror_of && strcmp(om->mirror_of, "main") == 0,
-          "origin/main: specchio di %s", om->mirror_of ? om->mirror_of : "-");
-    CHECK(om->state == PARENT_CERTAIN && om->parent &&
-              strcmp(om->parent, "main") == 0,
-          "origin/main: padre certo atteso 'main'");
-    CHECK(om->is_long_lived, "origin/main: long-lived come main");
+    CHECK(om->mirror_of == NULL, "origin/main: non deve essere specchio di main");
 
     const char *b2h = hash_of(data, "B2:");
     const char *b1h = hash_of(data, "B1:");
@@ -385,8 +402,8 @@ static int test_history_default(const GitData *data)
               "%s: primo commit proprio atteso X", amb[i]);
         CHECK(b->alias_count == 2, "%s: attesi 2 alias, trovati %zu", amb[i],
               b->alias_count);
-        CHECK(b->motivation && strstr(b->motivation, "gruppo di alias"),
-              "%s: la motivazione deve dichiarare il gruppo di alias", amb[i]);
+        CHECK(b->motivation && strstr(b->motivation, "stessa punta di"),
+              "%s: la motivazione deve dichiarare la stessa punta", amb[i]);
     }
 
     /* spareggio sulla data: tre branch nati dallo stesso punto R; solo la
@@ -401,19 +418,111 @@ static int test_history_default(const GitData *data)
     CHECK(oc->motivation && strstr(oc->motivation, "rebase"),
           "oC: la motivazione deve avvertire sull'affidabilita' delle date");
 
+    /* oB nasce come oC dallo stesso punto R, che appartiene a oA: la
+     * struttura dice gia' il padre, quindi nessuno spareggio per data */
     const BranchNode *ob = branch_named(&hist, "oB");
     REQUIRE(ob != NULL, "oB assente");
-    CHECK(ob->state == PARENT_AMBIGUOUS && ob->parent == NULL,
-          "oB: atteso ambiguo senza padre");
-    CHECK(ob->candidate_count == 2 && candidates_contain(ob, "oA") &&
-              candidates_contain(ob, "oC"),
-          "oB: candidati attesi oA, oC");
+    CHECK(ob->state == PARENT_DEDUCED && ob->parent &&
+              strcmp(ob->parent, "oA") == 0,
+          "oB: padre atteso 'oA', trovato %s", ob->parent ? ob->parent : "-");
+    CHECK(ob->motivation && !strstr(ob->motivation, "data"),
+          "oB: nessuno scarto per data atteso");
 
     const BranchNode *oa = branch_named(&hist, "oA");
     REQUIRE(oa != NULL, "oA assente");
     CHECK(oa->state == PARENT_NONE && oa->parent == NULL,
           "oA: nessun branch piu' antico, quindi nessun padre");
     CHECK(oa->fork_hash == NULL, "oA: nessun punto di diramazione");
+    CHECK(oa->genealogy_undetermined,
+          "oA: genealogia non determinabile deve essere dichiarata");
+    CHECK(oa->motivation && strstr(oa->motivation, "genealogia non determinabile"),
+          "oA: il motivo deve dichiarare la genealogia non determinabile");
+
+    /* --- riferimenti locali e remote-tracking con punte diverse -------------- */
+    /* origin/branch1 punta allo stesso commit di branch1: specchio provato */
+    const BranchNode *ob1 = branch_named(&hist, "origin/branch1");
+    REQUIRE(ob1 != NULL, "origin/branch1 assente");
+    CHECK(ob1->mirror_of && strcmp(ob1->mirror_of, "branch1") == 0,
+          "origin/branch1: specchio atteso di branch1, trovato %s",
+          ob1->mirror_of ? ob1->mirror_of : "-");
+    CHECK(ob1->state == PARENT_CERTAIN, "origin/branch1: stato certo atteso");
+    CHECK(ob1->tip_pos == b1->tip_pos,
+          "origin/branch1: stessa punta di branch1");
+
+    /* origin/main e upstream/main hanno lo stesso nome canonico di main ma
+     * punte diverse: nessuno specchio, nessuna relazione certa */
+    const BranchNode *om2 = branch_named(&hist, "origin/main");
+    const BranchNode *um = branch_named(&hist, "upstream/main");
+    const BranchNode *mb = branch_named(&hist, "main");
+    REQUIRE(om2 && um && mb, "riferimenti remoti assenti");
+    CHECK(om2->mirror_of == NULL,
+          "origin/main: non e' uno specchio (punta diversa da main)");
+    CHECK(um->mirror_of == NULL,
+          "upstream/main: non e' uno specchio (punta diversa da main)");
+    CHECK(om2->state != PARENT_CERTAIN && um->state != PARENT_CERTAIN,
+          "nessuna relazione certa sui remoti indipendenti");
+    CHECK(om2->tip_pos != mb->tip_pos && um->tip_pos != mb->tip_pos,
+          "i remoti devono conservare la propria punta reale");
+    CHECK(om2->parent && strcmp(om2->parent, "main") == 0,
+          "origin/main: padre dedotto main atteso, trovato %s",
+          om2->parent ? om2->parent : "-");
+    CHECK(um->parent && strcmp(um->parent, "main") == 0,
+          "upstream/main: padre dedotto main atteso, trovato %s",
+          um->parent ? um->parent : "-");
+    /* ogni riferimento conserva la punta del proprio riferimento Git */
+    for (size_t i = 0; i < hist.branch_count; i++) {
+        const BranchNode *n = &hist.branches[i];
+        const GitRef *r = &data->refs[n->ref_index];
+        if (n->tip_pos != (size_t)-1)
+            CHECK(strcmp(data->commits[n->tip_pos].hash, r->target) == 0,
+                  "%s: la punta non coincide con il riferimento", n->name);
+    }
+
+    /* --- genealogia: secondo genitore di un merge, merge ripetuti, rebase -- */
+    const char *b3h = hash_of(data, "B3:");
+    const char *c1h2 = hash_of(data, "SP1:");
+    const BranchNode *sp = branch_named(&hist, "sp");
+    REQUIRE(sp != NULL, "sp assente");
+    CHECK(sp->state == PARENT_DEDUCED && sp->parent &&
+              strcmp(sp->parent, "branch1") == 0,
+          "sp: padre dedotto branch1 atteso, trovato %s",
+          sp->parent ? sp->parent : "-");
+    CHECK(sp->fork_hash && b3h && strcmp(sp->fork_hash, b3h) == 0,
+          "sp: fork atteso su B3 (secondo genitore del merge)");
+    CHECK(sp->first_own_commit && c1h2 && strcmp(sp->first_own_commit, c1h2) == 0,
+          "sp: primo commit proprio atteso SP1");
+
+    const char *rm1h = hash_of(data, "RM1:");
+    const BranchNode *rm = branch_named(&hist, "rm");
+    REQUIRE(rm != NULL, "rm assente");
+    CHECK(rm->state == PARENT_DEDUCED && rm->parent &&
+              strcmp(rm->parent, "main") == 0,
+          "rm (merge ripetuti): padre dedotto main atteso");
+    CHECK(rm->fork_hash && ch && strcmp(rm->fork_hash, ch) == 0,
+          "rm: fork atteso su C, non sui commit dei merge");
+    CHECK(rm->first_own_commit && rm1h && strcmp(rm->first_own_commit, rm1h) == 0,
+          "rm: primo commit proprio atteso RM1");
+
+    const BranchNode *rb = branch_named(&hist, "rb");
+    const BranchNode *rbo = branch_named(&hist, "rb-old");
+    REQUIRE(rb && rbo, "branch ribasati assenti");
+    CHECK(rb->fork_hash && ch && strcmp(rb->fork_hash, ch) == 0,
+          "rb (ribasato su C): il fork segue la storia, non il nome");
+    CHECK(rb->first_own_commit != NULL && rbo->first_own_commit != NULL &&
+              strcmp(rb->first_own_commit, rbo->first_own_commit) != 0,
+          "rb e rb-old: hash dei commit proprio diversi (rebase effettuato)");
+    CHECK(rb->fork_hash && bh && strcmp(rbo->fork_hash, bh) == 0,
+          "rb-old: fork atteso su B");
+
+    /* ramo senza antenati condivisi: genealogia non determinabile */
+    const char *or1h = hash_of(data, "ORF1:");
+    const BranchNode *orf = branch_named(&hist, "orf");
+    REQUIRE(orf != NULL, "orf assente");
+    CHECK(orf->state == PARENT_NONE && orf->parent == NULL,
+          "orf: nessun padre (storia senza antenati condivisi)");
+    CHECK(orf->genealogy_undetermined, "orf: genealogia non determinabile");
+    CHECK(orf->first_own_commit && or1h && strcmp(orf->first_own_commit, or1h) == 0,
+          "orf: primo commit proprio atteso ORF1");
 
     /* determinismo: una seconda costruzione da' lo stesso modello */
     History hist2;
@@ -536,6 +645,85 @@ static void test_implicit_trunk_helper(void)
     config_free(&cfg);
 }
 
+/* ---------- quoting e cattura delle pipe (nessun blocco) ---------- */
+
+static void test_cmdline_quoting(void)
+{
+    char line[512];
+    const char *plain[] = { "git", "log", "--branches", NULL };
+    gitdata_build_cmdline(plain, line, sizeof line);
+    CHECK(strcmp(line, "git log --branches") == 0,
+          "argomenti semplici: '%s'", line);
+
+    /* spazi: l'intero argomento viene quotato */
+    const char *spaced[] = { "git", "rev-parse", "--git-dir=C:/Users/test utente/x",
+                             NULL };
+    gitdata_build_cmdline(spaced, line, sizeof line);
+    CHECK(strcmp(line, "git rev-parse \"--git-dir=C:/Users/test utente/x\"") == 0,
+          "percorso con spazi non quotato correttamente: '%s'", line);
+
+    /* argomento vuoto: due apici, per non farlo sparire */
+    const char *empty[] = { "git", "log", "", NULL };
+    gitdata_build_cmdline(empty, line, sizeof line);
+    CHECK(strcmp(line, "git log \"\"") == 0, "argomento vuoto: '%s'", line);
+
+    /* argomento quotato che termina con una barra: la barra va raddoppiata,
+     * altrimenti la virgoletta di chiusura viene "mangiata" dal runtime */
+    const char *slash[] = { "git", "log", "--dir=C:/cartella con spazio\\", NULL };
+    gitdata_build_cmdline(slash, line, sizeof line);
+    CHECK(strcmp(line, "git log \"--dir=C:/cartella con spazio\\\\\"") == 0,
+          "barra finale non raddoppiata: '%s'", line);
+
+    /* virgolette incorporate: diventano \" */
+    const char *quoted[] = { "git", "log", "--format=ciao \"%s\"", NULL };
+    gitdata_build_cmdline(quoted, line, sizeof line);
+    CHECK(strstr(line, "\\\"%s\\\"") != NULL,
+          "virgolette incorporate non protette: '%s'", line);
+}
+
+/* Un figlio che riempie una pipe non deve poter bloccare chi legge: la
+ * lettura avviene con un thread per pipe, quindi nessuna delle due puo'
+ *Fermare l'altra. Qui si riempiono entrambe, ben oltre la capacita' della pipe. */
+static void test_pipe_capture(void)
+{
+    /* stdout: ~250 KB */
+    const char *big_out[] = { "cmd.exe", "/c",
+                              "for /L %i in (1,1,40000) do @echo out-%i", NULL };
+    StrBuf out, errout;
+    sb_init(&out);
+    sb_init(&errout);
+    int code = -1;
+    char err[512];
+    bool ok = gitdata_capture(big_out, &out, &errout, &code, err, sizeof err);
+    CHECK(ok, "cattura stdout fallita: %s", err);
+    CHECK(out.len > 200000, "stdout catturato troppo corto: %zu byte", out.len);
+    CHECK(strstr(out.data, "out-40000") != NULL, "stdout incompleto");
+    CHECK(code == 0, "codice di uscita atteso 0, trovato %d", code);
+    sb_clear(&out);
+    sb_clear(&errout);
+
+    /* stderr: ~300 KB, mentre stdout resta vuota */
+    const char *big_err[] = { "cmd.exe", "/c",
+                              "for /L %i in (1,1,40000) do @echo err-%i 1>&2", NULL };
+    ok = gitdata_capture(big_err, &out, &errout, &code, err, sizeof err);
+    CHECK(ok, "cattura stderr fallita: %s", err);
+    CHECK(errout.len > 200000, "stderr catturato troppo corto: %zu byte",
+          errout.len);
+    CHECK(strstr(errout.data, "err-40000") != NULL, "stderr incompleto");
+    sb_free(&out);
+    sb_free(&errout);
+
+    /* comando che non esiste: fallisce senza crash e con messaggio */
+    const char *missing[] = { "gitgraph_programma_inesistente", NULL };
+    StrBuf o2, e2;
+    sb_init(&o2);
+    sb_init(&e2);
+    ok = gitdata_capture(missing, &o2, &e2, &code, err, sizeof err);
+    CHECK(!ok, "un programma inesistente deve far fallire la cattura");
+    sb_free(&o2);
+    sb_free(&e2);
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -573,6 +761,8 @@ int main(int argc, char **argv)
     rc |= test_history_default(&data);
     rc |= test_overrides(&data);
     rc |= test_long_lived_custom(&data);
+    test_cmdline_quoting();
+    test_pipe_capture();
     test_implicit_trunk_helper();
 
     gitdata_free(&data);

@@ -95,7 +95,33 @@ static size_t local_branch_count(const GitData *d)
     return n;
 }
 
-static void check_model(const History *h, const char *sub_index)
+static void check_deep_chain(const History *h, unsigned long depth)
+{
+    /* Il generatore con profondi' 1 crea una catena: ogni feature nasce dal
+     * feature precedente. Serve a verificare che il controllo delle relazioni
+     * circolari regga su gerarchie profonde. */
+    for (unsigned long i = 1; i <= depth; i++) {
+        char cur[64], prev[64];
+        snprintf(cur, sizeof cur, "feature/%lu", i);
+        snprintf(prev, sizeof prev, "feature/%lu", i - 1);
+        const BranchNode *n = branch_named(h, cur);
+        if (!n) {
+            fail("catena profonda: '%s' assente", cur);
+            continue;
+        }
+        if (!n->parent || strcmp(n->parent, prev) != 0) {
+            fail("catena profonda: '%s' ha padre '%s', atteso '%s'", cur,
+                 n->parent ? n->parent : "-", prev);
+            continue;
+        }
+        if (n->state != PARENT_DEDUCED)
+            fail("catena profonda: '%s' stato %d, atteso dedotto", cur, (int)n->state);
+        if (!n->fork_hash)
+            fail("catena profonda: '%s' senza punto di diramazione", cur);
+    }
+}
+
+static void check_model(const History *h, const char *sub_index, unsigned long deep)
 {
     for (size_t i = 0; i < h->branch_count; i++) {
         const BranchNode *b = &h->branches[i];
@@ -108,6 +134,8 @@ static void check_model(const History *h, const char *sub_index)
                   "'%s': ambiguo senza candidati", b->name);
         if (b->state == PARENT_DEDUCED)
             CHECK(b->parent != NULL, "'%s': dedotto senza padre", b->name);
+        /* ogni riferimento conserva la sua punta reale */
+        CHECK(b->tip_pos != (size_t)-1, "'%s': punta non risolta", b->name);
     }
 
     const BranchNode *main_b = branch_named(h, "main");
@@ -117,45 +145,53 @@ static void check_model(const History *h, const char *sub_index)
               "main: atteso nessun padre");
         CHECK(main_b->fork_hash == NULL, "main: atteso nessun fork");
         CHECK(main_b->candidate_count == 0, "main: attesi nessun candidato");
+        CHECK(main_b->is_long_lived, "main: atteso long-lived");
     }
 
-    /* primo feature (non mergiato) e secondo (mergiato): entrambi su main */
-    const char *features[] = {"feature/0", "feature/1"};
-    for (int i = 0; i < 2; i++) {
-        const BranchNode *f = branch_named(h, features[i]);
-        CHECK(f != NULL, "branch '%s' assente", features[i]);
-        if (f)
-            CHECK(f->state == PARENT_DEDUCED && f->parent &&
-                      strcmp(f->parent, "main") == 0,
-                  "'%s': padre atteso 'main', trovato %s", features[i],
-                  f->parent ? f->parent : "-");
-    }
+    /* primo feature (non mergiato) e secondo (mergiato): entrambi su main
+     * (nel caso della catena profonda la parentela e' verificata a parte) */
+    if (deep == 0) {
+        const char *features[] = {"feature/0", "feature/1"};
+        for (int i = 0; i < 2; i++) {
+            const BranchNode *f = branch_named(h, features[i]);
+            CHECK(f != NULL, "branch '%s' assente", features[i]);
+            if (f)
+                CHECK(f->state == PARENT_DEDUCED && f->parent &&
+                          strcmp(f->parent, "main") == 0,
+                      "'%s': padre atteso 'main', trovato %s", features[i],
+                      f->parent ? f->parent : "-");
+        }
 
-    if (sub_index) {
-        char sub[64];
-        snprintf(sub, sizeof sub, "sub/%s", sub_index);
-        const BranchNode *s = branch_named(h, sub);
-        CHECK(s != NULL, "branch '%s' assente", sub);
-        if (s) {
-            char parent[64];
-            snprintf(parent, sizeof parent, "feature/%s", sub_index);
-            CHECK(s->state == PARENT_DEDUCED && s->parent &&
-                      strcmp(s->parent, parent) == 0,
-                  "'%s': padre atteso '%s', trovato %s", sub, parent,
-                  s->parent ? s->parent : "-");
+        if (sub_index) {
+            char sub[64];
+            snprintf(sub, sizeof sub, "sub/%s", sub_index);
+            const BranchNode *s = branch_named(h, sub);
+            CHECK(s != NULL, "branch '%s' assente", sub);
+            if (s) {
+                char parent[64];
+                snprintf(parent, sizeof parent, "feature/%s", sub_index);
+                CHECK(s->state == PARENT_DEDUCED && s->parent &&
+                          strcmp(s->parent, parent) == 0,
+                      "'%s': padre atteso '%s', trovato %s", sub, parent,
+                      s->parent ? s->parent : "-");
+            }
         }
     }
+
+    if (deep > 0)
+        check_deep_chain(h, deep);
 }
 
 int main(int argc, char **argv)
 {
     if (argc < 3) {
         fprintf(stderr,
-                "uso: test_scale <percorso-repo> <budget_secondi> [indice_sub]\n");
+                "Uso: test_scale <percorso-repo> <budget_secondi> [indice_sub] [profondita]\n");
         return 2;
     }
     double budget = atof(argv[2]);
     const char *sub_index = (argc > 3) ? argv[3] : NULL;
+    unsigned long deep = (argc > 4) ? strtoul(argv[4], NULL, 10) : 0;
 
     char err[1024];
     clock_t t_all = clock();
@@ -209,7 +245,7 @@ int main(int argc, char **argv)
           "modello con %zu branch, repository con %zu riferimenti non-tag",
           h1.branch_count, local_branch_count(&data));
     CHECK(histories_equal(&h1, &h2), "il modello non e' deterministico");
-    check_model(&h1, sub_index);
+    check_model(&h1, sub_index, deep);
     CHECK(t_load + t_build <= budget,
           "budget superato: %.2f s > %.1f s", t_load + t_build, budget);
 

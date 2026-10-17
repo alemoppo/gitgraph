@@ -3,19 +3,55 @@
 # make_test_repo.sh [percorso]
 #
 # Crea un repository Git isolato e ripetibile per i test di gitgraph.
-# Non tocca altri repository. Default: ${TMPDIR:-/tmp}/gitgraph_test_repo
+# Default: ${TMPDIR:-/tmp}/gitgraph_test_repo
+#
+# SICUREZZA: lo script cancella SOLO directory che esso stesso ha creato,
+# riconosciute dal file .gitgraph_test_repo. Una directory esistente senza
+# quel marcatore (o un percorso pericoloso come "/", la home o la directory
+# temporanea) fa fallire lo script senza toccare nulla.
 #
 # Stesso contenuto della versione .bat: main(A,B,C), branch1 da B, branch2
-# da B2, merge --no-ff, fast-forward, branch cancellato dopo il merge, caso
-# ambiguo, gruppo isolato con date come spareggio (oA/oC/oB da R), branch con
+# da B2, merge --no-ff, fast-forward, branch cancellato dopo il merge, gruppo
+# di alias e branch figlio ambiguo, gruppo isolato con date come spareggio
+# (oA/oC/oB da R), remote-tracking con punte diverse, specchio con la stessa
+# punta, ramo nato dal secondo genitore di un merge, merge ripetuti, storia
+# ribasata, ramo senza antenati (genealogia non determinabile), branch con
 # slash, piu' riferimenti sullo stesso commit, messaggio con accenti e piu'
 # righe, uno stash.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 REPO="${1:-${GG_TEST_REPO:-${TMPDIR:-/tmp}/gitgraph_test_repo}}"
-rm -rf "$REPO"
+MARKER=".gitgraph_test_repo"
+
+die() { echo "ERRORE: $*" >&2; exit 1; }
+
+# --- controlli di sicurezza sul percorso --------------------------------------
+[ -n "$REPO" ] || die "percorso del repository di prova vuoto"
+# percorso assoluto normalizzato
+case "$REPO" in
+    /*) ;;
+    *) REPO="$PWD/$REPO" ;;
+esac
+# niente barre finali (radice "/"" resta "/")
+while [ "${#REPO}" -gt 1 ] && [ "${REPO%/}" != "$REPO" ]; do REPO="${REPO%/}"; done
+
+[ "$REPO" = "/" ] && die "\"$REPO\" e' la radice del filesystem: rifiutato"
+[ "$REPO" = "$PWD" ] && die "\"$REPO\" e' la directory corrente: rifiutato"
+[ "$REPO" = "$HOME" ] && die "\"$REPO\" e' la home utente: rifiutato"
+[ -n "${TMPDIR:-}" ] && [ "$REPO" = "${TMPDIR%/}" ] && die "\"$REPO\" e' la directory temporanea: rifiutato"
+[ "$REPO" = "/tmp" ] && die "\"$REPO\" e' la directory temporanea: rifiutato"
+
+if [ -d "$REPO" ]; then
+    [ -f "$REPO/$MARKER" ] ||
+        die "\"$REPO\" esiste e non contiene il marcatore $MARKER: lo script non cancella directory che non ha creato lui"
+    rm -rf -- "$REPO"
+elif [ -e "$REPO" ]; then
+    die "\"$REPO\" esiste e non e' una directory: rifiutato"
+fi
 mkdir -p "$REPO"
+# marcatore: da qui in poi la directory e' riconoscibile come nostra
+echo "gitgraph test repository" > "$REPO/$MARKER"
 
 export GIT_AUTHOR_NAME="Test User"
 export GIT_AUTHOR_EMAIL="test@example.com"
@@ -80,6 +116,10 @@ commit "2026-01-02T10:34:00+0000" "AC2: fine di ambchild"
 git -C "$REPO" checkout -q main
 GIT_AUTHOR_DATE="2026-01-02T10:40:00+0000" GIT_COMMITTER_DATE="2026-01-02T10:40:00+0000" \
     git -C "$REPO" merge -q --no-ff branch1 -m "Merge branch 'branch1' (--no-ff)"
+M1=$(git -C "$REPO" rev-parse HEAD)
+# basi usate dagli scenari di genealogia
+git -C "$REPO" tag base-b main~2
+git -C "$REPO" tag base-c main~1
 
 # --- branch temp: merge --no-ff poi cancellazione ---------------------------
 git -C "$REPO" checkout -q -b temp main
@@ -112,12 +152,53 @@ git -C "$REPO" checkout -q -b oB HEAD~1
 commit "2026-01-02T12:06:00+0000" "OB: terzo ramo isolato"
 git -C "$REPO" checkout -q main
 
+# --- genealogia: ramo nato dal secondo genitore di un merge -----------------
+# sp parte da $M1^2, cioe' dal secondo genitore del merge (B3).
+git -C "$REPO" checkout -q -b sp "$M1^2"
+commit "2026-01-02T12:20:00+0000" "SP1: nato dal secondo genitore del merge"
+commit "2026-01-02T12:22:00+0000" "SP2: altro lavoro su sp"
+
+# --- genealogia: merge ripetuti dello stesso branch in main -----------------
+git -C "$REPO" checkout -q main
+git -C "$REPO" checkout -q -b rm base-c
+commit "2026-01-02T12:30:00+0000" "RM1: lavoro su rm"
+git -C "$REPO" checkout -q main
+GIT_AUTHOR_DATE="2026-01-02T12:40:00+0000" GIT_COMMITTER_DATE="2026-01-02T12:40:00+0000" \
+    git -C "$REPO" merge -q --no-ff rm -m "main: primo merge di rm"
+git -C "$REPO" checkout -q rm
+commit "2026-01-02T12:50:00+0000" "RM2: altro lavoro su rm"
+git -C "$REPO" checkout -q main
+GIT_AUTHOR_DATE="2026-01-02T13:00:00+0000" GIT_COMMITTER_DATE="2026-01-02T13:00:00+0000" \
+    git -C "$REPO" merge -q --no-ff rm -m "main: secondo merge di rm"
+
+# --- genealogia: storia ribasata ---------------------------------------------
+# rb nasce su B, il commit viene riapplicato su C: gli hash cambiano e il fork
+# deve seguire la storia (C). rb-old conserva il commit originale.
+git -C "$REPO" checkout -q -b rb base-b
+commit "2026-01-02T13:10:00+0000" "RB1: lavoro che verra' ribasato"
+git -C "$REPO" branch rb-old
+git -C "$REPO" rebase -q base-c
+
+# --- genealogia non determinabile: ramo senza antenati condivisi --------------
+git -C "$REPO" checkout -q main
+git -C "$REPO" checkout -q --orphan orf
+commit "2026-01-02T14:00:00+0000" "ORF1: radice senza antenati"
+git -C "$REPO" checkout -q main
+
 # --- stash: non deve comparire nel grafo ------------------------------------
 echo "lavoro in corso" > "$REPO/wip.txt"
 git -C "$REPO" add wip.txt
 git -C "$REPO" stash push -q -m "lavoro in corso"
 
-# --- remote-tracking speculare (stessa punta di main: specchio) -------------
-git -C "$REPO" update-ref refs/remotes/origin/main main
+# --- remote-tracking: stessi nomi canonici, punte diverse --------------------
+# main punta a D; origin/main e' indietro di un commit (F1); upstream/main e'
+# indietro di tre (M1). Stesso nome canonico di main, punte diverse: nessuno
+# specchio, nessuna relazione certa dai soli nomi.
+git -C "$REPO" update-ref refs/remotes/origin/main main~1
+git -C "$REPO" update-ref refs/remotes/upstream/main main~3
+# --- specchio provato da Git: stesso nome canonico e stesso commit -----------
+git -C "$REPO" update-ref refs/remotes/origin/branch1 branch1
+# --- alias: nome diverso, stessa punta di feature/x --------------------------
+git -C "$REPO" update-ref refs/remotes/origin/feature-x feature/x
 
 echo "OK: $REPO"

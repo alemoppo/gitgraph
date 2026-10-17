@@ -1,13 +1,17 @@
 /* make_scale_repo.c - genera su stdout uno stream per `git fast-import`.
  *
- * Uso: make_scale_repo <commit_totali> <ogni_n_feature> <ogni_n_sub> [epoca]
+ * Uso: make_scale_repo <commit_totali> <ogni_n_feature> <ogni_n_sub>
+ *                       [<ogni_n_profondi>] [<epoca>]
  *
  * Struttura generata (deterministica, nessun file: solo commit vuoti):
  *  - commit lineari su refs/heads/main;
  *  - ogni `ogni_n_feature` commit di main nasce refs/heads/feature/<i>;
  *  - ogni `ogni_n_sub` feature nasce refs/heads/sub/<i>, mergiato subito
- *    nel feature con un commit di merge (--no-ff);
+ *    nel feature con un commit di merge (--no-ff); 0 = nessun sotto-branch;
  *  - ogni due feature, la seconda viene mergiata in main (--no-ff).
+ *  - con `ogni_n_profondi`, ogni N-esimo feature nasce dal feature precedente
+ *    invece che da main: catena di branch a profondi' crescente (prova del
+ *    controllo delle relazioni circolari); 0 = tutti i feature da main.
  * Tutti i ref restano: il numero di riferimenti cresce con i commit.
  *
  * Autore/committer fissi e date crescenti: lo stream e' ripetibile e gli
@@ -51,17 +55,21 @@ static unsigned long long put_commit(const char *ref, unsigned long long from,
 
 int main(int argc, char **argv)
 {
-    if (argc < 4 || argc > 5) {
+    if (argc < 4 || argc > 6) {
         fprintf(stderr,
-                "uso: make_scale_repo <commit_totali> <ogni_n_feature> <ogni_n_sub> [epoca]\n");
+                "uso: make_scale_repo <commit_totali> <ogni_n_feature> <ogni_n_sub>"
+                " [<ogni_n_profondi>] [<epoca>]\n");
         return 2;
     }
     unsigned long long total = strtoull(argv[1], NULL, 10);
     unsigned long feature_every = (unsigned long)strtoul(argv[2], NULL, 10);
     unsigned long sub_every = (unsigned long)strtoul(argv[3], NULL, 10);
-    if (argc == 5)
-        timestamp = strtoll(argv[4], NULL, 10);
-    if (total == 0 || feature_every < 2 || sub_every == 0) {
+    unsigned long deep_every = 0;
+    if (argc >= 5)
+        deep_every = (unsigned long)strtoul(argv[4], NULL, 10);
+    if (argc >= 6)
+        timestamp = strtoll(argv[5], NULL, 10);
+    if (total == 0 || feature_every < 2) {
         fprintf(stderr, "parametri non validi\n");
         return 2;
     }
@@ -74,6 +82,7 @@ int main(int argc, char **argv)
     unsigned long long main_mark = 0;
     unsigned long long since_feature = 0;
     unsigned long feature_index = 0;
+    unsigned long long chain_tip = 0; /* punta dell'ultimo feature della catena */
 
     printf("# gitgraph: repo sintetico per test di scala\n");
     while (made < total) {
@@ -90,14 +99,20 @@ int main(int argc, char **argv)
         char fref[64], sref[80];
         snprintf(fref, sizeof fref, "refs/heads/feature/%lu", fi);
 
+        /* base del feature: main, o il feature precedente se catena profonda */
+        unsigned long long base = main_mark;
+        if (deep_every > 0 && (fi % deep_every) == 0 && chain_tip != 0)
+            base = chain_tip;
+
         snprintf(msg, sizeof msg, "feature %lu: inizio", fi);
-        unsigned long long fm = put_commit(fref, main_mark, 0, msg);
+        unsigned long long fm = put_commit(fref, base, 0, msg);
         made++;
         snprintf(msg, sizeof msg, "feature %lu: lavoro", fi);
         fm = put_commit(fref, fm, 0, msg);
         made++;
+        chain_tip = fm;
 
-        if ((fi + 1) % sub_every == 0) {
+        if (sub_every > 0 && (fi + 1) % sub_every == 0) {
             snprintf(sref, sizeof sref, "refs/heads/sub/%lu", fi);
             snprintf(msg, sizeof msg, "sub %lu: inizio", fi);
             unsigned long long sm = put_commit(sref, fm, 0, msg);

@@ -3,57 +3,61 @@
  * Euristica (documentata, deterministica). Tutto lavora su indici di commit
  * precalcolati una sola volta: nessuna scansione di hash nei passi interni.
  *
- * 1. Gruppi e famiglie. I riferimenti con lo stesso nome canonico (branch
- *    locale + remote-tracking omonimi) formano un "gruppo" (gli specchi).
- *    I gruppi con la stessa punta formano una "famiglia di alias": sono lo
- *    stesso stato della storia (stessa catena dei primi genitori), quindi la
- *    deduzione vale per la famiglia; solo l'ordine interno tra gli alias e'
- *    non determinabile.
+ * 1. Riferimenti e famiglie. Ogni riferimento (locale o remoto) e' un nodo e
+ *    conserva la sua punta reale: due riferimenti con lo stesso nome canonico
+ *    ma punte diverse NON vengono fusi, e non si dichiara alcuno specchio.Uno
+ *    specchio si ha solo quando un remoto punta allo stesso commit di un
+ *    branch locale: e' un fatto ricavabile da Git. I riferimenti che puntano
+ *    allo stesso commit formano una famiglia: stessa genealogia, quindi stesso
+ *    padre dedotto; resta ambiguo solo il nome da usare fra loro.
  *
  * 2. Appartenenza dei commit. Le famiglie, nell'ordine deterministico
  *    (long-lived prima, poi nome), rivendicano i commit della propria catena
- *    dei primi genitori non ancora rivendicati da altri: ogni commit
- *    appartiene alla "regione propria" della prima famiglia che lo attraversa.
- *    La scelta tra diramazioni sorelle (stesso punto di partenza) e'
- *    arbitraria ma stabile: la storia non registra quale sia nata prima.
+ *    dei primi genitori non ancora rivendicati: ogni commit appartiene alla
+ *    "regione propria" della prima famiglia che lo attraversa. La scelta fra
+ *    diramazioni sorelle (stesso punto di partenza) e' arbitraria ma stabile:
+ *    la storia non registra quale sia nata prima.
  *
  * 3. Punto di diramazione f(b): il primo commit che, risalendo la catena dei
  *    primi genitori dalla punta di b, appartiene alla regione propria di
  *    un'altra famiglia. Non e' la raggiungibilita' generica: dopo un merge i
  *    commit di b sono raggiungibili da altri, ma la catena dei primi genitori
- *    non li attraversa, quindi il fork resta corretto.
+ *    non li attraversa, quindi il fork resta quello vero.
  *
  * 4. Primo commit proprio: il piu' vecchio commit rivendicato da b sulla
  *    catena (il figlio di f(b)); assente se la punta e' gia' rivendicata da
  *    altri (branch assorbito o fast-forward).
  *
- * 4. Candidati padre β di b (famiglia), con filtri O(1) grazie alla matrice
- *    di relazioni precalcolata sulle catene dei primi genitori:
- *      D1  la punta di b giace sulla catena di β          -> β discende da b;
- *      D2  f(β) sta sulla catena di b, piu' in alto di f(b) -> β e' figlio;
- *      D3  esistenza: f(b) sta sotto f(β) sulla catena di β -> β non esisteva;
- *      D4  assorbito: β senza commit propri e punta su un'altra catena, e non
+ * 5. Candidati padre b di b, con filtri O(1) grazie alla matrice di relazioni
+ *    precalcolata sulle catene dei primi genitori:
+ *      D1  la punta di b giace sulla catena di b          -> b discende da b;
+ *      D2  f(b) sta sulla catena di b, piu' in alto di f(b) -> b e' figlio;
+ *      D3  esistenza: f(b) sta sotto f(b) sulla catena di b -> b non esisteva;
+ *      D4  assorbito: b senza commit propri e punta su un'altra catena, e non
  *          proprio il punto di diramazione -> escluso (FF/alias non fanno da
  *          padre); i long-lived sono esentati (il tronco esiste da sempre);
  *      D5  fork uguali: si usa la data del primo commit proprio come
  *          spareggio quando la struttura non decide (scarto del candidato
  *          piu' recente di b); la motivazione lo dichiara sempre.
- *      D6  contenimento: f(b) deve giacere sulla catena di β.
+ *      D6  contenimento: f(b) deve giacere sulla catena di b.
  *
- * 5. Scelta del padre: un solo candidato -> dedotto; piu' candidati -> quello
- *    che e' a monte di tutti (raggiungibilita'), altrimenti ambiguo. Nessun
- *    candidato -> fallback: contenitori della punta (raggiungibilita'), o
- *    radice. I long-lived non hanno fork ne' candidati.
+ * 6. Scelta del padre: se un solo candidato possiede il punto di diramazione
+ *    (cioe' quel commit e' nella sua regione propria) e' il padre; se c'e' un
+ *    solo candidato e' il padre; altrimenti l'unico candidato a monte di tutti
+ *    gli altri; altrimenti ambiguo. Nessun candidato -> fallback: contenitori
+ *    della punta (raggiungibilita'), altrimenti nessun padre e la genealogia
+ *    viene dichiarata non determinabile. I long-lived non hanno padre, fork ne'
+ *    candidati.
  *
- * 6. Complessita'. Siano C i commit, R i riferimenti, G <= R le famiglie e
+ * 7. Complessita'. Siano C i commit, R i riferimenti, G <= R le famiglie e
  *    L_g la lunghezza della catena dei primi genitori della famiglia g.
- *    Precalcolo: O(C + genitori) per gli indici (in gitdata), O(Σ L_g) per i
- *    conteggi di catena, O(Σ L_g + G²) per la matrice di relazioni,
- *    O(Σ |raggiungibili|) per i bitset di raggiungibilita' (limite superiore
- *    G·C, in pratica molto meno). Deduzione: una sola passata O(G² + Σ L_g).
- *    Nessun percorso di catena o DFS viene rifatto per coppia di branch, e
- *    nulla viene riallocato per commit: il costo dipende linearmente dal
- *    repository, non dal prodotto di branch per cammini.
+ *    Precalcolo: O(C + genitori) per gli indici (in gitdata), O(S L_g) per
+ *    l'appartenenza dei commit e i punti di diramazione, O(S L_g + GÂ²) per la
+ *    matrice di relazioni, O(S |raggiungibili|) per i bitset di
+ *    raggiungibilita'. Deduzione: una sola passata O(GÂ² + S L_g). Il controllo
+ *    dei cicli usa una mappa nome->nodo: O(R) per gli aciclici. Nessun
+ *    percorso viene rifatto per coppia di branch e nulla viene riallocato per
+ *    commit: il costo cresce linearmente con il repository.
  */
 #include "history.h"
 
@@ -65,59 +69,46 @@
 
 #define NO_POS ((size_t)-1)
 
-/* Relazioni precalcolate, valutate sulla catena di g: rel[g*G + x].
- * "f(x)" e "tip(x)" sono il punto di diramazione e la punta della famiglia x. */
+/* Relazioni precalcolate, valutate sulla catena di g: rel[g*G + b].
+ * "f(b)" e "tip(b)" sono il punto di diramazione e la punta della famiglia b. */
 enum {
-    REL_F_ON_CHAIN = 1,   /* f(x) giace sulla catena di g */
-    REL_TIP_ON_CHAIN = 2, /* la punta di x giace sulla catena di g */
-    REL_F_BELOW = 4,      /* f(x) sotto f(g) sulla catena di g (piu' vecchio) */
-    REL_F_ABOVE = 8       /* f(x) sopra f(g) sulla catena di g (piu' recente) */
+    REL_F_ON_CHAIN = 1,   /* f(b) giace sulla catena di g */
+    REL_TIP_ON_CHAIN = 2, /* la punta di b giace sulla catena di g */
+    REL_F_BELOW = 4,      /* f(b) sotto f(g) sulla catena di g (piu' vecchio) */
+    REL_F_ABOVE = 8       /* f(b) sopra f(g) sulla catena di g (piu' recente) */
 };
 
 typedef struct {
-    char *canonical;   /* nome canonico del gruppo */
-    char *rep_name;    /* nome del rappresentante */
-    size_t rep_node;   /* indice in History.branches del rappresentante */
-    size_t *members;   /* indici nodo (rappresentante + specchi) */
-    size_t member_count;
-    size_t tip_idx;    /* indice del commit punta, NO_POS se fuori dal log */
-    bool is_ll;        /* gruppo long-lived (configurazione) */
-} Group;
-
-typedef struct {
-    size_t *groups;    /* gruppi della famiglia, in ordine deterministico */
-    size_t group_count;
-    size_t rep_group;  /* gruppo di riferimento (primo in ordine) */
+    size_t *nodes;       /* riferimenti con la stessa punta */
+    size_t node_count;
+    size_t rep_node;     /* rappresentante: preferisce un nodo locale, poi
+                            il primo in ordine di nome */
     size_t tip_idx;
-    int ll_rank;       /* rank minimo dei membri long-lived, -1 se nessuno */
-    bool all_ll;       /* tutti i membri sono long-lived */
-    size_t f;          /* punto di diramazione, NO_POS se assente */
-    size_t first_own;  /* primo commit proprio, NO_POS se assente */
-    bool date_used;    /* un candidato e' stato scartato per data */
-    size_t *cand;      /* indici famiglia candidati */
+    int ll_rank;         /* rank minimo dei membri long-lived, -1 se nessuno */
+    bool trunk;           /* il rappresentante e' long-lived: famiglia di tronco */
+    size_t f;            /* punto di diramazione, NO_POS se assente */
+    size_t first_own;    /* primo commit proprio, NO_POS se assente */
+    bool date_used;      /* un candidato e' stato scartato per data */
+    size_t *cand;        /* indici famiglia candidati */
     size_t cand_count;
-    BitSet *reach;     /* commit raggiungibili dalla punta */
+    BitSet *reach;       /* commit raggiungibili dalla punta */
 } Family;
 
 typedef struct {
     const GitData *d;
     const GraphConfig *cfg;
     History *out;
-    Group *groups;
-    size_t group_count;
     Family *families;
     size_t family_count;
-    size_t *group_family;    /* gruppo -> famiglia */
-    size_t *group_order;     /* gruppi in ordine deterministico */
-    size_t *group_rank;      /* posizione in group_order */
-    size_t *family_order;    /* famiglie in ordine deterministico */
-    uint8_t *rel;            /* matrice G*G delle relazioni */
-    size_t *scratch_pos;     /* posizione sullla catena corrente */
-    uint32_t *scratch_gen;   /* generazione della catena corrente */
+    size_t *node_family;    /* nodo -> famiglia */
+    size_t *family_order;   /* famiglie in ordine deterministico */
+    size_t *owner;          /* commit -> famiglia che lo rivendica */
+    uint8_t *rel;           /* matrice G*G delle relazioni */
+    size_t *scratch_pos;    /* posizione sulla catena corrente */
+    uint32_t *scratch_gen;  /* generazione della catena corrente */
     uint32_t gen;
-    size_t *stack;           /* buffer riutilizzato per i DFS */
-    StrMap *canonical_map;   /* nome canonico -> (indice gruppo + 1) */
-    StrMap *name_map;        /* nome nodo -> (indice nodo + 1) */
+    size_t *stack;          /* buffer riutilizzato per i DFS e i cammini */
+    StrMap *name_map;       /* nome nodo -> (indice nodo + 1) */
 } Ctx;
 
 /* ---------- helper su commit ---------- */
@@ -144,15 +135,20 @@ static int64_t date_at(const Ctx *ctx, size_t idx)
     return c ? c->date : 0;
 }
 
-/* ---------- ordine deterministico ---------- */
+static const BranchNode *node_at(const Ctx *ctx, size_t i)
+{
+    return &ctx->out->branches[i];
+}
 
 static int cmp_str_ptr(const void *a, const void *b)
 {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
+/* ---------- ordine deterministico ---------- */
+
 /* Chiave di ordinamento: long-lived prima (nell'ordine della configurazione),
- * poi per nome canonico. */
+ * poi per nome. */
 typedef struct {
     size_t idx;
     int rank;          /* -1 se non long-lived */
@@ -185,6 +181,7 @@ static size_t add_node(History *out, const GitRef *r, const char *canonical)
     n->long_lived_rank = -1;
     n->fork_pos = NO_POS;
     n->first_own_pos = NO_POS;
+    n->tip_pos = NO_POS;
     return out->branch_count++;
 }
 
@@ -196,6 +193,7 @@ static void set_parent(BranchNode *n, const char *parent, ParentState st,
     n->parent = parent ? xstrdup(parent) : NULL;
     n->state = st;
     n->motivation = xstrdup(motivation);
+    n->genealogy_undetermined = false;
 }
 
 static void set_fork(BranchNode *n, const Ctx *ctx, size_t fork_idx)
@@ -222,7 +220,6 @@ static void set_first_own(BranchNode *n, const Ctx *ctx, size_t idx)
     }
 }
 
-/* Azzera fork e primo commit proprio (long-lived e riferimenti invalidI). */
 static void clear_lineage(BranchNode *n)
 {
     free(n->fork_hash);
@@ -242,33 +239,18 @@ static void clear_candidates(BranchNode *n)
     n->candidate_count = 0;
 }
 
-/* ---------- costruzione di gruppi e famiglie ---------- */
-
-static void group_free(Group *g)
-{
-    free(g->canonical);
-    free(g->rep_name);
-    free(g->members);
-}
+/* ---------- costruzione di nodi, specchi e famiglie ---------- */
 
 static void family_free(Family *f)
 {
-    free(f->groups);
+    free(f->nodes);
     free(f->cand);
     bitset_free(f->reach);
 }
 
-static bool ctx_init(Ctx *ctx, History *out, const GitData *data, const GraphConfig *cfg)
+static void create_nodes(Ctx *ctx, const GitData *data)
 {
-    memset(ctx, 0, sizeof *ctx);
-    ctx->d = data;
-    ctx->cfg = cfg;
-    ctx->out = out;
-    ctx->canonical_map = strmap_new();
-    ctx->name_map = strmap_new();
-
-    size_t cap_groups = data->ref_count ? data->ref_count : 1;
-    ctx->groups = xcalloc(cap_groups, sizeof(Group));
+    History *out = ctx->out;
     for (size_t i = 0; i < data->ref_count; i++) {
         const GitRef *r = &data->refs[i];
         if (r->kind == REF_TAG)
@@ -282,137 +264,96 @@ static bool ctx_init(Ctx *ctx, History *out, const GitData *data, const GraphCon
         size_t node = add_node(out, r, canonical);
         strmap_put(ctx->name_map, out->branches[node].name,
                    (void *)(uintptr_t)(node + 1));
-
-        size_t gi;
-        void *v = strmap_get(ctx->canonical_map, canonical);
-        if (v) {
-            gi = (size_t)(uintptr_t)v - 1;
-        } else {
-            gi = ctx->group_count++;
-            Group *g = &ctx->groups[gi];
-            memset(g, 0, sizeof *g);
-            g->canonical = xstrdup(canonical);
-            g->rep_node = NO_POS;
-            g->tip_idx = NO_POS;
-            strmap_put(ctx->canonical_map, g->canonical,
-                       (void *)(uintptr_t)(gi + 1));
-        }
-        Group *g = &ctx->groups[gi];
-        g->members = xrealloc(g->members, (g->member_count + 1) * sizeof(size_t));
-        g->members[g->member_count++] = node;
+        /* la punta reale del riferimento, sempre conservata */
+        out->branches[node].tip_pos = gitdata_find_commit(data, r->target);
     }
-    return true;
 }
 
-/* Rappresentante di ogni gruppo, specchi, punte, long-lived. */
-static void finalize_groups(Ctx *ctx)
+/* Punta reale, rango long-lived e specchi. Lo specchio richiede lo STESSO
+ * commit: un remoto che ha solo lo stesso nome canonico ma una punta diversa
+ * resta un riferimento autonomo (la relazione di tracking non e' deducibile
+ * dai soli nomi) e non eredita il rango long-lived del branch locale. */
+static void finalize_nodes(Ctx *ctx)
 {
     History *out = ctx->out;
-    for (size_t gi = 0; gi < ctx->group_count; gi++) {
-        Group *g = &ctx->groups[gi];
-        size_t rep = NO_POS;
-        for (size_t k = 0; k < g->member_count; k++) {
-            size_t node = g->members[k];
-            if (!out->branches[node].is_remote) {
-                rep = node;
-                break;
+    StrMap *locals = strmap_new();
+    for (size_t i = 0; i < out->branch_count; i++) {
+        BranchNode *n = &out->branches[i];
+        if (!n->is_remote)
+            strmap_put(locals, n->canonical, (void *)(uintptr_t)(i + 1));
+    }
+    for (size_t i = 0; i < out->branch_count; i++) {
+        BranchNode *n = &out->branches[i];
+        n->long_lived_rank = config_long_lived_rank(ctx->cfg, n->name);
+        if (n->is_remote) {
+            void *v = strmap_get(locals, n->canonical);
+            const BranchNode *ln = v ? node_at(ctx, (size_t)(uintptr_t)v - 1) : NULL;
+            if (ln && ln->tip_pos != NO_POS && ln->tip_pos == n->tip_pos) {
+                /* specchio provato: stesso nome canonico e stesso commit */
+                n->mirror_of = xstrdup(ln->name);
+                if (n->long_lived_rank < 0)
+                    n->long_lived_rank = ln->long_lived_rank;
+            } else if (!ln && n->long_lived_rank < 0) {
+                /* esiste solo il riferimento remoto: vale il nome canonico */
+                n->long_lived_rank = config_long_lived_rank(ctx->cfg, n->canonical);
             }
+            /* ramo locale presente ma con punta diversa: nessuna relazione di
+             * tracking e' deducibile dai soli nomi, quindi il remoto non
+             * eredita il ruolo di tronco e mantiene la genealogia dedotta */
         }
-        if (rep == NO_POS)
-            rep = g->members[0];
-        g->rep_node = rep;
-        g->rep_name = xstrdup(out->branches[rep].name);
-
-        const GitRef *r = &out->data->refs[out->branches[rep].ref_index];
-        g->tip_idx = gitdata_find_commit(out->data, r->target);
-
-        for (size_t k = 0; k < g->member_count; k++) {
-            size_t node = g->members[k];
-            if (node == rep)
-                continue;
-            out->branches[node].mirror_of = xstrdup(out->branches[rep].name);
-        }
-
-        int rank = config_long_lived_rank(ctx->cfg, g->canonical);
-        g->is_ll = (rank >= 0);
-        for (size_t k = 0; k < g->member_count; k++) {
-            BranchNode *n = &out->branches[g->members[k]];
-            n->is_long_lived = (rank >= 0);
-            n->long_lived_rank = rank;
-        }
+        n->is_long_lived = (n->long_lived_rank >= 0);
     }
+    strmap_free(locals);
 }
 
-static void build_group_order(Ctx *ctx)
-{
-    size_t n = ctx->group_count;
-    ctx->group_order = xmalloc((n ? n : 1) * sizeof(size_t));
-    ctx->group_rank = xmalloc((n ? n : 1) * sizeof(size_t));
-    OrderKey *keys = xmalloc((n ? n : 1) * sizeof(OrderKey));
-    for (size_t i = 0; i < n; i++) {
-        keys[i].idx = i;
-        keys[i].rank = config_long_lived_rank(ctx->cfg, ctx->groups[i].canonical);
-        keys[i].name = ctx->groups[i].canonical;
-    }
-    qsort(keys, n, sizeof(OrderKey), cmp_order_key);
-    for (size_t i = 0; i < n; i++) {
-        ctx->group_order[i] = keys[i].idx;
-        ctx->group_rank[keys[i].idx] = i;
-    }
-    free(keys);
-}
-
-/* Famiglie: gruppi con la stessa punta. */
+/* Famiglie: riferimenti con la stessa punta. */
 static void build_families(Ctx *ctx)
 {
     size_t n = ctx->d->commit_count;
-    size_t g = ctx->group_count;
-    ctx->group_family = xmalloc((g ? g : 1) * sizeof(size_t));
-    ctx->families = xcalloc(g ? g : 1, sizeof(Family));
+    size_t b = ctx->out->branch_count;
+    ctx->node_family = xmalloc((b ? b : 1) * sizeof(size_t));
+    ctx->families = xcalloc(b ? b : 1, sizeof(Family));
     ctx->family_count = 0;
 
     size_t *fam_of_tip = xmalloc((n ? n : 1) * sizeof(size_t));
     for (size_t i = 0; i < n; i++)
         fam_of_tip[i] = NO_POS;
 
-    for (size_t oi = 0; oi < g; oi++) {
-        size_t gi = ctx->group_order[oi];
-        Group *grp = &ctx->groups[gi];
+    for (size_t i = 0; i < b; i++) {
+        size_t tip = ctx->out->branches[i].tip_pos;
         size_t fi;
-        if (grp->tip_idx != NO_POS) {
-            fi = fam_of_tip[grp->tip_idx];
+        if (tip != NO_POS) {
+            fi = fam_of_tip[tip];
             if (fi == NO_POS) {
                 fi = ctx->family_count++;
-                ctx->families[fi].tip_idx = grp->tip_idx;
-                fam_of_tip[grp->tip_idx] = fi;
+                ctx->families[fi].tip_idx = tip;
+                fam_of_tip[tip] = fi;
             }
         } else {
-            fi = ctx->family_count++;
+            fi = ctx->family_count++; /* punta fuori dal log: famiglia isolata */
             ctx->families[fi].tip_idx = NO_POS;
         }
         Family *fam = &ctx->families[fi];
-        fam->groups = xrealloc(fam->groups, (fam->group_count + 1) * sizeof(size_t));
-        fam->groups[fam->group_count++] = gi;
-        ctx->group_family[gi] = fi;
+        fam->nodes = xrealloc(fam->nodes, (fam->node_count + 1) * sizeof(size_t));
+        fam->nodes[fam->node_count++] = i;
+        ctx->node_family[i] = fi;
     }
     free(fam_of_tip);
 
     for (size_t fi = 0; fi < ctx->family_count; fi++) {
         Family *fam = &ctx->families[fi];
-        fam->rep_group = fam->groups[0];
-        fam->ll_rank = -1;
-        bool all_ll = true;
-        for (size_t k = 0; k < fam->group_count; k++) {
-            const Group *grp = &ctx->groups[fam->groups[k]];
-            if (grp->is_ll) {
-                int rank = config_long_lived_rank(ctx->cfg, grp->canonical);
-                if (fam->ll_rank < 0 || rank < fam->ll_rank)
-                    fam->ll_rank = rank;
-            } else {
-                all_ll = false;
-            }
+        fam->rep_node = fam->nodes[0];
+        for (size_t k = 0; k < fam->node_count; k++) {
+            size_t node = fam->nodes[k];
+            if (!node_at(ctx, node)->is_remote && node_at(ctx, fam->rep_node)->is_remote)
+                fam->rep_node = node; /* il rappresentante e' il branch locale */
         }
-        fam->all_ll = all_ll;
+        /* Il tronco e' deciso dal rappresentante: una famiglia che contiene un
+         * long-lived "in coda" (per esempio uno specchio remoto) nonPromuove
+         * il branch locale a tronco. */
+        const BranchNode *rep = node_at(ctx, fam->rep_node);
+        fam->ll_rank = rep->long_lived_rank;
+        fam->trunk = rep->is_long_lived;
         fam->f = NO_POS;
         fam->first_own = NO_POS;
     }
@@ -426,7 +367,7 @@ static void build_family_order(Ctx *ctx)
     for (size_t i = 0; i < n; i++) {
         keys[i].idx = i;
         keys[i].rank = ctx->families[i].ll_rank;
-        keys[i].name = ctx->groups[ctx->families[i].rep_group].canonical;
+        keys[i].name = ctx->out->branches[ctx->families[i].rep_node].name;
     }
     qsort(keys, n, sizeof(OrderKey), cmp_order_key);
     for (size_t i = 0; i < n; i++)
@@ -436,25 +377,44 @@ static void build_family_order(Ctx *ctx)
 
 /* ---------- precalcoli sulle catene dei primi genitori ---------- */
 
-/* f e primo commit proprio di ogni famiglia.
+static void chain_fill(Ctx *ctx, size_t fi);
+static bool chain_has(const Ctx *ctx, size_t commit_idx);
+
+/* Punti di diramazione e regioni proprie.
  *
- * Regola di appartenenza (deterministica, una sola passata): le famiglie,
- * nell'ordine stabilito (long-lived prima, poi nome), rivendicano i commit
- * della propria catena non ancora rivendicati. La "regione propria" di b e'
- * l'insieme dei commit che b ha rivendicato: f(b) e' il primo commit,
- * risalendo la catena dalla punta, rivendicato da un'altra famiglia; il primo
- * commit proprio e' il piu' vecchio commit rivendicato da b, assente se la
- * punta e' gia' rivendicata da altri (branch assorbito o fast-forward).
- * La scelta tra diramazioni sorelle (stesso punto di partenza) e' arbitraria
- * ma stabile: la storia non registra quale sia nata prima. */
-static void compute_forks(Ctx *ctx)
+ * Regole, indipendenti dall'ordine di visita:
+ *  - un tronco (long-lived) non puo' essere una diramazione di un altro ramo:
+ *    risalendo la sua catena non si ferma mai sulla punta di un'altra
+ *    famiglia, e rivendica tutto cio' che incontra libero;
+ *  - ogni altro branch che risale e trova la punta di un'altra famiglia si e'
+ *    diramato li': quel commit e' il suo punto di diramazione e resta di chi
+ *    lo aveva raggiunto prima;
+ *  - un commit non ancora rivendicato diventa proprio di chi lo incontra; un
+ *    commit gia' rivendicato da un'altra famiglia e' il punto di diramazione;
+ *  - una famiglia che non rivendica nulla (fast-forward, specchio lontano,
+ *    alias) non ha nemmeno una base: fork assente, resta da stabilire a chi
+ *    appartiene con il fallback sui contenitori.
+ * L'ordine conta solo per i tronchi, che sono sempre visitati per primi
+ * (long-lived prima, poi nome): e' cio' che rende deterministico il resto. */
+static void compute_ownership_and_forks(Ctx *ctx)
 {
     size_t n = ctx->d->commit_count;
-    size_t *claimed = xmalloc((n ? n : 1) * sizeof(size_t));
+    size_t g = ctx->family_count;
+    ctx->owner = xmalloc((n ? n : 1) * sizeof(size_t));
     for (size_t i = 0; i < n; i++)
-        claimed[i] = NO_POS;
+        ctx->owner[i] = NO_POS;
 
-    for (size_t oi = 0; oi < ctx->family_count; oi++) {
+    /* famiglia che possiede ciascuna punta (le famiglie sono per punta, quindi
+     * il proprietario e' unico) */
+    size_t *tip_owner = xmalloc((n ? n : 1) * sizeof(size_t));
+    for (size_t i = 0; i < n; i++)
+        tip_owner[i] = NO_POS;
+    for (size_t fi = 0; fi < g; fi++) {
+        if (ctx->families[fi].tip_idx != NO_POS)
+            tip_owner[ctx->families[fi].tip_idx] = fi;
+    }
+
+    for (size_t oi = 0; oi < g; oi++) {
         size_t fi = ctx->family_order[oi];
         Family *fam = &ctx->families[fi];
         if (fam->tip_idx == NO_POS)
@@ -463,19 +423,24 @@ static void compute_forks(Ctx *ctx)
         size_t own = NO_POS;
         size_t f = NO_POS;
         while (cur != NO_POS) {
-            if (claimed[cur] == NO_POS) {
-                claimed[cur] = fi;
+            size_t tip_g = tip_owner[cur];
+            if (!fam->trunk && tip_g != NO_POS && tip_g != fi) {
+                f = cur; /* biforcazione dalla punta di un altro ramo */
+                break;
+            }
+            if (ctx->owner[cur] == NO_POS) {
+                ctx->owner[cur] = fi;
                 own = cur;
-            } else if (claimed[cur] != fi) {
+            } else if (ctx->owner[cur] != fi) {
                 f = cur;
                 break;
             }
             cur = first_parent(ctx, cur);
         }
-        fam->f = f;
+        fam->f = (own == NO_POS) ? NO_POS : f; /* senza commit propri: niente base */
         fam->first_own = own;
     }
-    free(claimed);
+    free(tip_owner);
 }
 
 /* Riempie lo scratch con le posizioni (0 = punta) sulla catena della famiglia. */
@@ -518,9 +483,8 @@ static void reach_build(Ctx *ctx, size_t fi, BitSet *set)
     }
 }
 
-/* Matrice delle relazioni: per ogni catena (riga g) e ogni famiglia b,
- * dove stanno f(b) e la punta di b rispetto alla catena di g. Costo
- * O(Σ L_g + G²), una sola passata. */
+/* Matrice delle relazioni: per ogni catena (riga g) e ogni famiglia b, dove
+ * stanno f(b) e la punta di b rispetto alla catena di g. */
 static void build_rel(Ctx *ctx)
 {
     size_t g = ctx->family_count;
@@ -562,7 +526,7 @@ static void run_pass(Ctx *ctx)
         Family *b = &ctx->families[bi];
         b->cand_count = 0;
         b->date_used = false;
-        if (b->tip_idx == NO_POS || b->f == NO_POS || b->all_ll)
+        if (b->tip_idx == NO_POS || b->f == NO_POS || b->trunk)
             continue;
         const uint8_t *rel_b = &ctx->rel[bi * g];
         for (size_t xi = 0; xi < g; xi++) {
@@ -571,19 +535,19 @@ static void run_pass(Ctx *ctx)
             Family *beta = &ctx->families[xi];
             if (beta->tip_idx == NO_POS)
                 continue;
-            uint8_t rb = ctx->rel[xi * g + bi]; /* f(b), tip(b) vs catena di β */
+            uint8_t rb = ctx->rel[xi * g + bi]; /* f(b), tip(b) vs catena di beta */
             if (rb & REL_TIP_ON_CHAIN)
-                continue; /* D1: β discende da b */
+                continue; /* D1: beta discende da b */
             if (rel_b[xi] & REL_F_ABOVE)
-                continue; /* D2: β si e' diramato da un commit interno di b */
+                continue; /* D2: beta si e' diramato da un commit interno di b */
             if (!(rb & REL_F_ON_CHAIN))
-                continue; /* D6: β non contiene il punto di diramazione */
-            if (!beta->all_ll) {
+                continue; /* D6: beta non contiene il punto di diramazione */
+            if (!beta->trunk) {
                 if (beta->first_own != NO_POS) {
                     if (rb & REL_F_BELOW)
-                        continue; /* D3: β non esisteva a f(b) */
+                        continue; /* D3: beta non esisteva a f(b) */
                 } else if (beta->tip_idx != b->f) {
-                    continue; /* D4: β assorbito (FF/alias), non fa da padre */
+                    continue; /* D4: beta assorbito (FF/alias), non fa da padre */
                 }
                 /* D5: fork uguali, decisione per data (spareggio dichiarato) */
                 if (beta->f == b->f && beta->first_own != NO_POS &&
@@ -601,35 +565,32 @@ static void run_pass(Ctx *ctx)
 
 /* ---------- nomi ---------- */
 
-/* Lista dei nomi delle famiglie indicate, in ordine deterministico di gruppo. */
+/* Nomi dei riferimenti delle famiglie indicate, nell'ordine deterministico
+ * delle famiglie (long-lived prima, poi nome del rappresentante); dentro una
+ * famiglia compaiono tutti i riferimenti, perche' sono la stessa genealogia e
+ * non si puo' scegliere fra loro un nome unico. */
 static char *join_family_names(const Ctx *ctx, const size_t *fams, size_t count)
 {
-    /* una voce per ogni gruppo delle famiglie elencate */
-    size_t *gs = xmalloc((ctx->group_count ? ctx->group_count : 1) * sizeof(size_t));
-    size_t ng = 0;
-    for (size_t i = 0; i < count; i++) {
-        const Family *fam = &ctx->families[fams[i]];
-        for (size_t k = 0; k < fam->group_count; k++)
-            gs[ng++] = fam->groups[k];
-    }
-    /* ordina per posizione nell'ordine dei gruppi */
-    for (size_t i = 1; i < ng; i++) {
-        size_t key = gs[i];
-        size_t j = i;
-        while (j > 0 && ctx->group_rank[key] < ctx->group_rank[gs[j - 1]]) {
-            gs[j] = gs[j - 1];
-            j--;
-        }
-        gs[j] = key;
-    }
+    size_t g = ctx->family_count;
+    char *want = xcalloc(g ? g : 1, 1);
+    for (size_t i = 0; i < count; i++)
+        want[fams[i]] = 1;
     StrBuf sb;
     sb_init(&sb);
-    for (size_t i = 0; i < ng; i++) {
-        if (i)
-            sb_append(&sb, ", ");
-        sb_append(&sb, ctx->groups[gs[i]].rep_name);
+    bool first = true;
+    for (size_t oi = 0; oi < g; oi++) {
+        size_t fi = ctx->family_order[oi];
+        if (!want[fi])
+            continue;
+        const Family *fam = &ctx->families[fi];
+        for (size_t k = 0; k < fam->node_count; k++) {
+            if (!first)
+                sb_append(&sb, ", ");
+            first = false;
+            sb_append(&sb, ctx->out->branches[fam->nodes[k]].name);
+        }
     }
-    free(gs);
+    free(want);
     return sb.data;
 }
 
@@ -661,9 +622,43 @@ static void set_node_candidates(Ctx *ctx, BranchNode *n, const Family *fam)
 
 /* ---------- deduzione del padre ---------- */
 
+/* Nome del ramo locale che rappresenta una famiglia, se c'e' esattamente un
+ * branch locale: gli altri riferimenti della famiglia sono i suoi specchi
+ * (stesso commit) e non creano un'ambiguita' reale. Con piu' branch locali
+ * (alias veri, es. amb1/amb2/ambbase) la scelta resta ambigua. */
+static const char *family_local_name(const Ctx *ctx, const Family *fam)
+{
+    const char *name = NULL;
+    for (size_t k = 0; k < fam->node_count; k++) {
+        const BranchNode *n = node_at(ctx, fam->nodes[k]);
+        if (n->is_remote)
+            continue;
+        if (name)
+            return NULL;
+        name = n->name;
+    }
+    return name;
+}
+
+/* Vero se i contenitori elencati sono tutti riferimenti allo stesso ramo
+ * canonico (stesso nome, punte diverse): allora non e' un'ambiguita' reale,
+ * risponde il rappresentante locale. */
+static bool one_canonical_name(const Ctx *ctx, const size_t *fams, size_t count)
+{
+    const char *first = NULL;
+    for (size_t i = 0; i < count; i++) {
+        const BranchNode *n = node_at(ctx, ctx->families[fams[i]].rep_node);
+        if (!first)
+            first = n->canonical;
+        else if (strcmp(first, n->canonical) != 0)
+            return false;
+    }
+    return true;
+}
+
 typedef struct {
     ParentState state;
-    char *parent;       /* da xstrdup sui nodi; ownership del chiamante */
+    char *parent;       /* da liberare dopo l'applicazione */
     char *motivation;   /* idem */
     size_t fork_idx;
     size_t first_own_idx;
@@ -685,11 +680,10 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
     } else {
         d->fork_idx = b->f;
         d->first_own_idx = b->first_own;
-        if (b->f != NO_POS) {
+        if (b->f != NO_POS)
             gitdata_short_hash(commit_at(ctx, b->f)->hash, 8, sh);
-        } else {
+        else
             sh[0] = '\0';
-        }
 
         if (b->cand_count == 0) {
             /* fallback: famiglie che contengono la punta (raggiungibilita') */
@@ -707,34 +701,80 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
             if (nh == 0) {
                 d->state = PARENT_NONE;
                 if (b->f != NO_POS)
-                    sb_appendf(&mot, "nessun branch piu' antico del punto di diramazione %s", sh);
+                    sb_appendf(&mot,
+                               "genealogia non determinabile: nessun branch piu' antico "
+                               "del punto di diramazione %s",
+                               sh);
                 else
-                    sb_append(&mot, "nessun punto di diramazione: nessun branch piu' antico condivide questa storia");
-            } else if (nh == 1 && ctx->families[holders[0]].group_count == 1) {
-                d->state = PARENT_DEDUCED;
-                d->parent = xstrdup(ctx->groups[ctx->families[holders[0]].rep_group].rep_name);
-                sb_appendf(&mot, "nessun commit proprio: interamente contenuto in '%s'", d->parent);
+                    sb_append(&mot,
+                              "genealogia non determinabile: nessun altro branch "
+                              "condivide la storia");
+            } else if (nh == 1 || one_canonical_name(ctx, holders, nh)) {
+                /* piu' riferimenti con lo stesso nome canonico (specchi lontani)
+                 * sono lo stesso ramo: si risponde col rappresentante locale */
+                size_t pick = holders[0];
+                for (size_t i = 1; i < nh; i++) {
+                    const Family *a = &ctx->families[holders[i]];
+                    const Family *b2 = &ctx->families[pick];
+                    bool a_local = !node_at(ctx, a->rep_node)->is_remote;
+                    bool b_local = !node_at(ctx, b2->rep_node)->is_remote;
+                    if (a_local && !b_local)
+                        pick = holders[i];
+                }
+                const Family *h = &ctx->families[pick];
+                d->fork_idx = b->f;
+                d->first_own_idx = b->first_own;
+                const char *local = family_local_name(ctx, h);
+                if (local) {
+                    d->state = PARENT_DEDUCED;
+                    d->parent = xstrdup(local);
+                    sb_appendf(&mot, "nessun commit proprio: interamente contenuto in '%s'",
+                               d->parent);
+                } else if (h->node_count == 1) {
+                    d->state = PARENT_DEDUCED;
+                    d->parent = xstrdup(ctx->out->branches[h->rep_node].name);
+                    sb_appendf(&mot, "nessun commit proprio: interamente contenuto in '%s'",
+                               d->parent);
+                } else {
+                    char *lhs = join_family_names(ctx, &pick, 1);
+                    d->state = PARENT_AMBIGUOUS;
+                    sb_appendf(&mot,
+                               "nessun commit proprio; il contenitore e' uno dei riferimenti "
+                               "sulla stessa punta: %s",
+                               lhs);
+                    free(lhs);
+                }
             } else {
                 char *lhs = join_family_names(ctx, holders, nh);
                 d->state = PARENT_AMBIGUOUS;
-                if (nh == 1)
-                    sb_appendf(&mot,
-                               "nessun commit proprio; il contenitore e' uno dei branch sulla "
-                               "stessa punta: %s", lhs);
-                else
-                    sb_appendf(&mot, "nessun commit proprio; piu' branch contengono la punta: %s", lhs);
+                sb_appendf(&mot, "nessun commit proprio; piu' branch contengono la punta: %s",
+                           lhs);
                 free(lhs);
             }
             free(holders);
-        } else if (b->cand_count == 1 && ctx->families[b->cand[0]].group_count == 1) {
-            d->state = PARENT_DEDUCED;
-            d->parent = xstrdup(ctx->groups[ctx->families[b->cand[0]].rep_group].rep_name);
-            sb_appendf(&mot, "punto di diramazione %s sul ramo di '%s'", sh, d->parent);
         } else {
-            /* piu' nomi sulla stessa punta, o piu' candidati */
+            /* Scelta: il candidato che possiede il punto di diramazione (il
+             * commit e' nella sua regione propria) e' il padre naturale; se
+             * nessuno lo possiede, unico candidato; altrimenti l'unico a monte
+             * di tutti; altrimenti ambiguo. */
             size_t chosen = NO_POS;
             size_t count = 0;
-            if (b->cand_count > 1) {
+            bool by_owner = false;
+            if (b->f != NO_POS && ctx->owner[b->f] != NO_POS) {
+                for (size_t i = 0; i < b->cand_count; i++) {
+                    if (b->cand[i] == ctx->owner[b->f]) {
+                        chosen = b->cand[i];
+                        count++;
+                    }
+                }
+                by_owner = (count == 1);
+            }
+            if (!by_owner && b->cand_count == 1) {
+                chosen = b->cand[0];
+                count = 1;
+            }
+            if (!by_owner && count != 1 && b->cand_count > 1) {
+                count = 0;
                 for (size_t i = 0; i < b->cand_count; i++) {
                     const Family *c = &ctx->families[b->cand[i]];
                     bool ok = true;
@@ -750,26 +790,40 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                         count++;
                     }
                 }
-            } else {
-                chosen = b->cand[0];
-                count = 1;
             }
-            if (count == 1 && ctx->families[chosen].group_count == 1) {
+            const char *chosen_name =
+                (chosen != NO_POS) ? family_local_name(ctx, &ctx->families[chosen]) : NULL;
+            if (count == 1 && chosen_name) {
                 d->state = PARENT_DEDUCED;
-                d->parent = xstrdup(ctx->groups[ctx->families[chosen].rep_group].rep_name);
-                if (b->cand_count > 1)
-                    sb_appendf(&mot, "punto di diramazione %s; '%s' e' a monte degli altri candidati",
+                d->parent = xstrdup(chosen_name);
+                if (by_owner)
+                    sb_appendf(&mot,
+                               "punto di diramazione %s: quel commit appartiene al ramo di '%s'",
+                               sh, d->parent);
+                else if (b->cand_count > 1)
+                    sb_appendf(&mot,
+                               "punto di diramazione %s; '%s' e' a monte degli altri candidati",
                                sh, d->parent);
                 else
-                    sb_appendf(&mot, "punto di diramazione %s sul ramo di '%s'", sh, d->parent);
+                    sb_appendf(&mot, "punto di diramazione %s sul ramo di '%s'", sh,
+                               d->parent);
+            } else if (count == 1 && chosen != NO_POS &&
+                       ctx->families[chosen].node_count == 1) {
+                /* famiglia di un solo riferimento remoto (nessun branch locale) */
+                d->state = PARENT_DEDUCED;
+                d->parent = xstrdup(ctx->out->branches[ctx->families[chosen].rep_node].name);
+                sb_appendf(&mot, "punto di diramazione %s sul ramo di '%s'", sh, d->parent);
             } else {
                 char *lhs = join_family_names(ctx, b->cand, b->cand_count);
                 d->state = PARENT_AMBIGUOUS;
                 if (b->cand_count == 1)
-                    sb_appendf(&mot, "punto di diramazione %s; piu' branch sulla stessa punta: %s",
+                    sb_appendf(&mot,
+                               "punto di diramazione %s; piu' riferimenti sulla stessa punta: %s",
                                sh, lhs);
                 else
-                    sb_appendf(&mot, "piu' branch contengono il punto di diramazione %s: %s", sh, lhs);
+                    sb_appendf(&mot,
+                               "piu' branch contengono il punto di diramazione %s: %s", sh,
+                               lhs);
                 free(lhs);
             }
         }
@@ -790,38 +844,39 @@ static void deduction_free(Deduction *d)
 
 /* ---------- assegnazione ---------- */
 
-/* Alias: gli altri gruppi della famiglia (nomi), in ordine alfabetico. */
-static void set_alias_members(Ctx *ctx, const Family *fam, size_t gi, BranchNode *n)
+/* Alias: gli altri riferimenti con la stessa punta, in ordine alfabetico. */
+static void set_alias_members(Ctx *ctx, const Family *fam, size_t self, BranchNode *n)
 {
-    if (fam->group_count < 2)
+    if (fam->node_count < 2)
         return;
-    n->alias_members = xmalloc((fam->group_count - 1) * sizeof(char *));
+    n->alias_members = xmalloc((fam->node_count - 1) * sizeof(char *));
     n->alias_count = 0;
-    for (size_t k = 0; k < fam->group_count; k++) {
-        size_t other = fam->groups[k];
-        if (other == gi)
+    for (size_t k = 0; k < fam->node_count; k++) {
+        size_t other = fam->nodes[k];
+        if (other == self)
             continue;
-        n->alias_members[n->alias_count++] = xstrdup(ctx->groups[other].rep_name);
+        n->alias_members[n->alias_count++] =
+            xstrdup(ctx->out->branches[other].name);
     }
     qsort(n->alias_members, n->alias_count, sizeof(char *), cmp_str_ptr);
 }
 
-static void append_alias_note(Ctx *ctx, const Family *fam, size_t gi, StrBuf *mot)
+static void append_alias_note(Ctx *ctx, const Family *fam, size_t self, StrBuf *mot)
 {
-    if (fam->group_count < 2)
+    if (fam->node_count < 2)
         return;
-    sb_append(mot, "; fa parte di un gruppo di alias con ");
+    sb_append(mot, "; stessa punta di ");
     bool first = true;
-    for (size_t k = 0; k < fam->group_count; k++) {
-        size_t other = fam->groups[k];
-        if (other == gi)
+    for (size_t k = 0; k < fam->node_count; k++) {
+        size_t other = fam->nodes[k];
+        if (other == self)
             continue;
         if (!first)
             sb_append(mot, ", ");
         first = false;
-        sb_appendf(mot, "'%s'", ctx->groups[other].rep_name);
+        sb_appendf(mot, "'%s'", ctx->out->branches[other].name);
     }
-    sb_append(mot, " sulla stessa punta: ordine interno non determinabile");
+    sb_append(mot, " (stesso padre dedotto; il nome interno e' ambiguo)");
 }
 
 static void assign_family(Ctx *ctx, size_t fi)
@@ -833,88 +888,87 @@ static void assign_family(Ctx *ctx, size_t fi)
     memset(&d, 0, sizeof d);
     d.fork_idx = NO_POS;
     d.first_own_idx = NO_POS;
-    if (!fam->all_ll)
+    if (!fam->trunk)
         deduce(ctx, fi, &d);
 
-    for (size_t k = 0; k < fam->group_count; k++) {
-        size_t gi = fam->groups[k];
-        Group *g = &ctx->groups[gi];
-        for (size_t mi = 0; mi < g->member_count; mi++) {
-            size_t node = g->members[mi];
-            BranchNode *n = &out->branches[node];
-            set_alias_members(ctx, fam, gi, n);
+    for (size_t k = 0; k < fam->node_count; k++) {
+        size_t node = fam->nodes[k];
+        BranchNode *n = &out->branches[node];
+        set_alias_members(ctx, fam, node, n);
 
-            if (node != g->rep_node) {
-                /* specchio: remote-tracking del rappresentante */
-                char mot[512];
-                snprintf(mot, sizeof mot, "remote-tracking di '%s'", g->rep_name);
-                set_parent(n, g->rep_name, PARENT_CERTAIN, mot);
-                if (!n->is_long_lived) {
-                    set_fork(n, ctx, d.fork_idx);
-                    set_first_own(n, ctx, d.first_own_idx);
-                } else {
-                    clear_lineage(n);
-                }
-                continue;
-            }
-
-            if (n->is_long_lived) {
+        /* specchio provato da Git: stesso nome canonico e stesso commit */
+        if (n->mirror_of) {
+            char mot[512];
+            snprintf(mot, sizeof mot,
+                     "remote-tracking che punta allo stesso commit di '%s'", n->mirror_of);
+            set_parent(n, n->mirror_of, PARENT_CERTAIN, mot);
+            if (!n->is_long_lived) {
+                set_fork(n, ctx, d.fork_idx);
+                set_first_own(n, ctx, d.first_own_idx);
+            } else {
                 clear_lineage(n);
-                clear_candidates(n);
-                StrBuf mot;
-                sb_init(&mot);
-                sb_append(&mot, "tronco long-lived (configurazione): padre non dedotto");
-                append_alias_note(ctx, fam, gi, &mot);
-                set_parent(n, NULL, PARENT_NONE, mot.data);
-                sb_free(&mot);
-                continue;
             }
+            continue;
+        }
 
-            /* override da configurazione (precedenza assoluta) */
-            const char *ov_parent = NULL;
-            char ov_note[256] = "";
-            if (ctx->cfg) {
-                for (size_t oi = 0; oi < ctx->cfg->override_count; oi++) {
-                    const ParentOverride *ov = &ctx->cfg->overrides[oi];
-                    if (strcmp(ov->branch, n->name) != 0)
-                        continue;
-                    if (strmap_get(ctx->name_map, ov->parent)) {
-                        ov_parent = ov->parent;
-                    } else {
-                        snprintf(ov_note, sizeof ov_note,
-                                 "override da graph.cfg ignorato: branch '%s' inesistente",
-                                 ov->parent);
-                    }
-                    break;
-                }
-            }
-
-            set_node_candidates(ctx, n, fam);
-            set_fork(n, ctx, d.fork_idx);
-            set_first_own(n, ctx, d.first_own_idx);
-
+        if (n->is_long_lived) {
+            clear_lineage(n);
+            clear_candidates(n);
             StrBuf mot;
             sb_init(&mot);
-            if (ov_parent) {
-                sb_appendf(&mot, "override da graph.cfg: padre '%s'", ov_parent);
-                if (ov_note[0]) {
-                    sb_append(&mot, "; ");
-                    sb_append(&mot, ov_note);
-                }
-                append_alias_note(ctx, fam, gi, &mot);
-                set_parent(n, ov_parent, PARENT_CONFIGURED, mot.data);
-            } else {
-                sb_append(&mot, d.motivation ? d.motivation : "");
-                if (ov_note[0]) {
-                    if (mot.len)
-                        sb_append(&mot, "; ");
-                    sb_append(&mot, ov_note);
-                }
-                append_alias_note(ctx, fam, gi, &mot);
-                set_parent(n, d.parent, d.state, mot.data);
-            }
+            sb_append(&mot, "tronco long-lived (configurazione): padre non dedotto");
+            append_alias_note(ctx, fam, node, &mot);
+            set_parent(n, NULL, PARENT_NONE, mot.data);
             sb_free(&mot);
+            continue;
         }
+
+        /* override da configurazione (precedenza assoluta) */
+        const char *ov_parent = NULL;
+        char ov_note[256] = "";
+        if (ctx->cfg) {
+            for (size_t oi = 0; oi < ctx->cfg->override_count; oi++) {
+                const ParentOverride *ov = &ctx->cfg->overrides[oi];
+                if (strcmp(ov->branch, n->name) != 0)
+                    continue;
+                if (strmap_get(ctx->name_map, ov->parent)) {
+                    ov_parent = ov->parent;
+                } else {
+                    snprintf(ov_note, sizeof ov_note,
+                             "override da graph.cfg ignorato: branch '%s' inesistente",
+                             ov->parent);
+                }
+                break;
+            }
+        }
+
+        set_node_candidates(ctx, n, fam);
+        set_fork(n, ctx, d.fork_idx);
+        set_first_own(n, ctx, d.first_own_idx);
+
+        StrBuf mot;
+        sb_init(&mot);
+        if (ov_parent) {
+            sb_appendf(&mot, "override da graph.cfg: padre '%s'", ov_parent);
+            if (ov_note[0]) {
+                sb_append(&mot, "; ");
+                sb_append(&mot, ov_note);
+            }
+            append_alias_note(ctx, fam, node, &mot);
+            set_parent(n, ov_parent, PARENT_CONFIGURED, mot.data);
+        } else {
+            sb_append(&mot, d.motivation ? d.motivation : "");
+            if (ov_note[0]) {
+                if (mot.len)
+                    sb_append(&mot, "; ");
+                sb_append(&mot, ov_note);
+            }
+            append_alias_note(ctx, fam, node, &mot);
+            set_parent(n, d.parent, d.state, mot.data);
+            if (d.state == PARENT_NONE && fam->tip_idx != NO_POS)
+                n->genealogy_undetermined = true;
+        }
+        sb_free(&mot);
     }
     deduction_free(&d);
 }
@@ -931,42 +985,65 @@ size_t history_find_branch(const History *h, const char *name)
 }
 
 /* Rompe gli eventuali cicli di paternita' (possibili con override
- * incoerenti). Per ciascun ciclo il nodo con nome minore diventa ambiguo:
- * l'euristica non inventa un padre per una relazione circolare. */
-static void break_parent_cycles(History *out)
+ * incoerenti). Per ogni ciclo il nodo col nome minore diventa ambiguo: non si
+ * inventa un padre per una relazione circolare.
+ *
+* Ogni passo usa la mappa nome->nodo (O(1)) e la memoizzazione dei nodi gia'
+ * verificati senza ciclo: su un grafo aciclico il costo totale e' lineare nei
+ * riferimenti, non quadratico nei nomi. */
+static void break_parent_cycles(History *out, StrMap *name_map)
 {
-    for (size_t guard = 0; guard <= out->branch_count; guard++) {
+    size_t b = out->branch_count;
+    if (b == 0)
+        return;
+    uint8_t *safe = xcalloc(b, 1); /* gia' verificato: il cammino non ha cicli */
+    size_t *path = xmalloc((b + 1) * sizeof(size_t)); /* il ciclo puo' essere
+                                                        formato da tutti i nodi */
+
+    for (size_t guard = 0; guard <= b; guard++) {
         bool found = false;
-        for (size_t i = 0; i < out->branch_count && !found; i++) {
+        for (size_t i = 0; i < b && !found; i++) {
             if (!out->branches[i].parent)
                 continue;
+            size_t len = 0;
             size_t cur = i;
             bool cycle = false;
-            for (size_t step = 0; step < out->branch_count; step++) {
+            for (size_t step = 0; step <= b; step++) {
                 const char *pname = out->branches[cur].parent;
                 if (!pname)
                     break;
-                size_t p = history_find_branch(out, pname);
-                if (p == NO_POS)
+                void *v = strmap_get(name_map, pname);
+                if (!v)
                     break;
+                size_t p = (size_t)(uintptr_t)v - 1;
                 if (p == i) {
                     cycle = true;
                     break;
                 }
+                if (safe[p])
+                    break; /* da li' in poi non ci sono cicli */
+                path[len++] = cur;
                 cur = p;
             }
-            if (!cycle)
+            if (!cycle) {
+                for (size_t k = 0; k < len; k++)
+                    safe[path[k]] = 1;
                 continue;
+            }
+            /* ciclo: il nodo col nome minore perde il padre */
             size_t best = i;
             cur = i;
-            for (;;) {
+            for (size_t step = 0; step <= b; step++) {
                 if (strcmp(out->branches[cur].name, out->branches[best].name) < 0)
                     best = cur;
                 const char *pname = out->branches[cur].parent;
                 if (!pname)
                     break;
-                size_t p = history_find_branch(out, pname);
-                if (p == NO_POS || p == i)
+                void *v = strmap_get(name_map, pname);
+                if (!v)
+                    break;
+                size_t p = (size_t)(uintptr_t)v - 1;
+                if (p == i)
                     break;
                 cur = p;
             }
@@ -974,6 +1051,7 @@ static void break_parent_cycles(History *out)
             free(bn->parent);
             bn->parent = NULL;
             bn->state = PARENT_AMBIGUOUS;
+            bn->genealogy_undetermined = true;
             free(bn->motivation);
             bn->motivation =
                 xstrdup("paternita' circolare tra branch: relazione non determinabile");
@@ -982,6 +1060,8 @@ static void break_parent_cycles(History *out)
         if (!found)
             break;
     }
+    free(path);
+    free(safe);
 }
 
 bool history_build(History *out, const GitData *data, const GraphConfig *cfg,
@@ -991,13 +1071,17 @@ bool history_build(History *out, const GitData *data, const GraphConfig *cfg,
     out->data = data;
 
     Ctx ctx;
-    ctx_init(&ctx, out, data, cfg);
+    memset(&ctx, 0, sizeof ctx);
+    ctx.d = data;
+    ctx.cfg = cfg;
+    ctx.out = out;
+    ctx.name_map = strmap_new();
     (void)err;
     (void)err_size;
 
-    if (ctx.group_count > 0) {
-        finalize_groups(&ctx);
-        build_group_order(&ctx);
+    create_nodes(&ctx, data);
+    if (out->branch_count > 0) {
+        finalize_nodes(&ctx);
         build_families(&ctx);
         build_family_order(&ctx);
 
@@ -1006,7 +1090,8 @@ bool history_build(History *out, const GitData *data, const GraphConfig *cfg,
         ctx.scratch_gen = xcalloc(n ? n : 1, sizeof(uint32_t));
         ctx.stack = xmalloc((n ? n : 1) * sizeof(size_t));
 
-        compute_forks(&ctx);
+        compute_ownership_and_forks(&ctx);
+
 
         for (size_t fi = 0; fi < ctx.family_count; fi++) {
             ctx.families[fi].reach = bitset_new(n);
@@ -1018,22 +1103,17 @@ bool history_build(History *out, const GitData *data, const GraphConfig *cfg,
         for (size_t oi = 0; oi < ctx.family_count; oi++)
             assign_family(&ctx, ctx.family_order[oi]);
 
-        break_parent_cycles(out);
+        break_parent_cycles(out, ctx.name_map);
     }
 
-    strmap_free(ctx.canonical_map);
     strmap_free(ctx.name_map);
-    free(ctx.group_family);
-    free(ctx.group_order);
-    free(ctx.group_rank);
+    free(ctx.node_family);
     free(ctx.family_order);
+    free(ctx.owner);
     free(ctx.rel);
     free(ctx.scratch_pos);
     free(ctx.scratch_gen);
     free(ctx.stack);
-    for (size_t gi = 0; gi < ctx.group_count; gi++)
-        group_free(&ctx.groups[gi]);
-    free(ctx.groups);
     for (size_t fi = 0; fi < ctx.family_count; fi++)
         family_free(&ctx.families[fi]);
     free(ctx.families);
