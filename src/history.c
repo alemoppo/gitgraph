@@ -304,6 +304,26 @@ static bool ctx_init(Ctx *ctx, History *out, const GitData *data, const GraphCon
     return true;
 }
 
+/* Rank long-lived di un gruppo: si prova il nome canonico, poi il
+ * rappresentante, poi gli altri nomi del gruppo. Cosi' "[long-lived]
+ * origin/main" vale quanto "[long-lived] main", essendo il remote-tracking
+ * uno specchio dello stesso branch. */
+static int group_ll_rank(const Ctx *ctx, const Group *g)
+{
+    int rank = config_long_lived_rank(ctx->cfg, g->canonical);
+    if (rank < 0 && g->rep_name)
+        rank = config_long_lived_rank(ctx->cfg, g->rep_name);
+    if (rank < 0) {
+        for (size_t k = 0; k < g->member_count; k++) {
+            const BranchNode *n = &ctx->out->branches[g->members[k]];
+            rank = config_long_lived_rank(ctx->cfg, n->name);
+            if (rank >= 0)
+                break;
+        }
+    }
+    return rank;
+}
+
 /* Rappresentante di ogni gruppo, specchi, punte, long-lived. */
 static void finalize_groups(Ctx *ctx)
 {
@@ -333,7 +353,7 @@ static void finalize_groups(Ctx *ctx)
             out->branches[node].mirror_of = xstrdup(out->branches[rep].name);
         }
 
-        int rank = config_long_lived_rank(ctx->cfg, g->canonical);
+        int rank = group_ll_rank(ctx, g);
         g->is_ll = (rank >= 0);
         for (size_t k = 0; k < g->member_count; k++) {
             BranchNode *n = &out->branches[g->members[k]];
@@ -351,7 +371,7 @@ static void build_group_order(Ctx *ctx)
     OrderKey *keys = xmalloc((n ? n : 1) * sizeof(OrderKey));
     for (size_t i = 0; i < n; i++) {
         keys[i].idx = i;
-        keys[i].rank = config_long_lived_rank(ctx->cfg, ctx->groups[i].canonical);
+        keys[i].rank = group_ll_rank(ctx, &ctx->groups[i]);
         keys[i].name = ctx->groups[i].canonical;
     }
     qsort(keys, n, sizeof(OrderKey), cmp_order_key);
@@ -405,7 +425,7 @@ static void build_families(Ctx *ctx)
         for (size_t k = 0; k < fam->group_count; k++) {
             const Group *grp = &ctx->groups[fam->groups[k]];
             if (grp->is_ll) {
-                int rank = config_long_lived_rank(ctx->cfg, grp->canonical);
+                int rank = group_ll_rank(ctx, grp);
                 if (fam->ll_rank < 0 || rank < fam->ll_rank)
                     fam->ll_rank = rank;
             } else {

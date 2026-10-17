@@ -107,17 +107,30 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* configurazione implicita (fase 1: nessun file); il tronco e' main/master */
+    /* configurazione: graph.cfg nella radice del repository, se presente;
+     * altrimenti il solo tronco implicite (main/master) */
     {
         char **names = xmalloc((data.ref_count ? data.ref_count : 1) * sizeof(char *));
         size_t n = 0;
         for (size_t i = 0; i < data.ref_count; i++) {
-            if (data.refs[i].kind == REF_LOCAL_BRANCH)
+            if (data.refs[i].kind != REF_TAG)
                 names[n++] = data.refs[i].name;
         }
+        char *cfg_path = config_path_in_repo(data.repo_path);
+        ConfigReport report;
+        char cfg_err[1024];
         GraphConfig cfg;
-        memset(&cfg, 0, sizeof cfg);
-        config_set_implicit_trunk(&cfg, names, n);
+        bool ok = config_load(&cfg, cfg_path, names, n, &report, cfg_err,
+                              sizeof cfg_err);
+        for (size_t i = 0; i < report.count; i++)
+            fprintf(stderr, "%s: %s\n",
+                    report.items[i].level == CONFIG_DIAG_ERROR ? "errore"
+                                                                : "avviso",
+                    report.items[i].text);
+        if (!ok)
+            fprintf(stderr, "%s: configurazione ignorata\n", cfg_err);
+        free(cfg_path);
+        config_report_free(&report);
         free(names);
 
         History hist;
@@ -134,6 +147,15 @@ int main(int argc, char **argv)
         else
             printf("branch corrente: (HEAD scollegata)\n");
         printf("commit: %zu  riferimenti: %zu\n", data.commit_count, data.ref_count);
+        if (cfg.long_lived_count > 0) {
+            printf("long-lived (ordine di gerarchia):");
+            for (size_t i = 0; i < cfg.long_lived_count; i++)
+                printf(" %s", cfg.long_lived[i]);
+            printf("%s\n", cfg.long_lived_explicit ? "" : "  (tronco implicito)");
+        }
+        for (size_t i = 0; i < cfg.override_count; i++)
+            printf("override [parents]: %s = %s\n", cfg.overrides[i].branch,
+                   cfg.overrides[i].parent);
         printf("\n");
 
         printf("RIFERIMENTI\n");

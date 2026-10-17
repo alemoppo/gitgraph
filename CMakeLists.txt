@@ -42,6 +42,9 @@ target_link_libraries(test_core PRIVATE gg_core)
 add_executable(test_scale tests/test_scale.c)
 target_link_libraries(test_scale PRIVATE gg_core)
 
+add_executable(test_config tests/test_config.c)
+target_link_libraries(test_config PRIVATE gg_core)
+
 # Generatore di repository sintetici: scrive su stdout uno stream per
 # "git fast-import" (nessuna dipendenza dal core, serve solo la libc).
 add_executable(scale_repo_gen tests/make_scale_repo.c)
@@ -61,6 +64,11 @@ set_tests_properties(make_test_repo PROPERTIES FIXTURES_SETUP testrepo)
 
 add_test(NAME core COMMAND test_core "${GG_TEST_REPO}")
 set_tests_properties(core PROPERTIES FIXTURES_REQUIRED testrepo)
+
+# graph.cfg: sintassi, wildcard, validazione e uso end-to-end sul repo di prova
+# (il test scrive e rimuove graph.cfg dentro quel repository).
+add_test(NAME config COMMAND test_config "${CMAKE_CURRENT_BINARY_DIR}" "${GG_TEST_REPO}")
+set_tests_properties(config PROPERTIES FIXTURES_REQUIRED testrepo)
 
 add_test(NAME dump_smoke COMMAND gitgraph_dump "${GG_TEST_REPO}")
 set_tests_properties(dump_smoke PROPERTIES FIXTURES_REQUIRED testrepo)
