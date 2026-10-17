@@ -647,6 +647,32 @@ static void test_implicit_trunk_helper(void)
 
 /* ---------- quoting e cattura delle pipe (nessun blocco) ---------- */
 
+/* Fallimento simulato della creazione del thread di lettura. */
+static void *reader_thread_always_fails(void *reader)
+{
+    (void)reader;
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return NULL;
+}
+
+/* File di riempimento (~300 KB, ben oltre la capacita' di una pipe). */
+static bool write_padding_file(const char *path, char filler)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    char buf[4096];
+    memset(buf, filler, sizeof buf);
+    for (int i = 0; i < 75; i++) { /* 75 * 4096 = 307200 byte */
+        if (fwrite(buf, 1, sizeof buf, f) != sizeof buf) {
+            fclose(f);
+            return false;
+        }
+    }
+    fclose(f);
+    return true;
+}
+
 static void test_cmdline_quoting(void)
 {
     char line[512];
@@ -718,10 +744,101 @@ static void test_pipe_capture(void)
     StrBuf o2, e2;
     sb_init(&o2);
     sb_init(&e2);
+    err[0] = '\0';
     ok = gitdata_capture(missing, &o2, &e2, &code, err, sizeof err);
     CHECK(!ok, "un programma inesistente deve far fallire la cattura");
+    CHECK(err[0] != '\0', "il fallimento di avvio deve lasciare un messaggio");
+    CHECK(code == -1, "senza processo non c'e' un codice di uscita (atteso -1, trovato %d)",
+          code);
     sb_free(&o2);
     sb_free(&e2);
+
+    /* uscita non zero: non e' un errore, il codice viene riportato */
+    const char *failing[] = { "cmd.exe", "/c", "echo prima & exit /b 3", NULL };
+    StrBuf o3, e3;
+    sb_init(&o3);
+    sb_init(&e3);
+    err[0] = '\0';
+    ok = gitdata_capture(failing, &o3, &e3, &code, err, sizeof err);
+    CHECK(ok, "un codice di uscita non zero non deve far fallire la cattura");
+    CHECK(code == 3, "codice di uscita atteso 3, trovato %d", code);
+    CHECK(strstr(o3.data, "prima") != NULL, "l'output prima dell'uscita deve arrivare");
+    sb_free(&o3);
+    sb_free(&e3);
+
+    /* entrambe le pipe attive *contemporaneamente*: il comando scrive un file
+     * su stdout e, tramite un processo figlio che eredita la pipe di errore,
+     * un altro su stderr. Entrambi i file superano di molto la capacita' di
+     * una pipe, quindi senza lettura concorrente il figlio si bloccherebbe. */
+    char out_file[MAX_PATH], err_file[MAX_PATH], temp_dir[MAX_PATH];
+    DWORD tlen = GetTempPathA(sizeof temp_dir, temp_dir);
+    bool tmp_ok = (tlen > 0 && tlen < sizeof temp_dir);
+    CHECK(tmp_ok, "percorso temporaneo non ottenibile");
+    if (!tmp_ok)
+        return;
+    snprintf(out_file, sizeof out_file, "%sgg_pipe_out.txt", temp_dir);
+    snprintf(err_file, sizeof err_file, "%sgg_pipe_err.txt", temp_dir);
+    bool wrote = write_padding_file(out_file, 'o') && write_padding_file(err_file, 'e');
+    CHECK(wrote, "scrittura dei file di prova fallita");
+    if (!wrote)
+        return;
+    if (strchr(temp_dir, ' ')) {
+        /* i path con spazi andrebbero quotati dentro il comando, ma le
+         * virgolette annidate non sono ammissibili nella riga di /c: in quel
+         * caso il caso viene saltato (e dichiarato) invece di fallire */
+        CHECK(false, "saltato: la directory temporanea contiene spazi ('%s')",
+              temp_dir);
+        remove(out_file);
+        remove(err_file);
+        return;
+    }
+
+    char both_cmd[1024];
+    snprintf(both_cmd, sizeof both_cmd, "start /b cmd /c type %s 1>&2 & type %s",
+             err_file, out_file);
+    const char *both[] = { "cmd.exe", "/c", both_cmd, NULL };
+    StrBuf o4, e4;
+    sb_init(&o4);
+    sb_init(&e4);
+    err[0] = '\0';
+    ok = gitdata_capture(both, &o4, &e4, &code, err, sizeof err);
+    CHECK(ok, "cattura con entrambe le pipe attive: %s", err);
+    CHECK(o4.len > 250000, "stdout con entrambe le pipe attive troppo corto: %zu byte",
+          o4.len);
+    CHECK(e4.len > 250000, "stderr con entrambe le pipe attive troppo corto: %zu byte",
+          e4.len);
+    CHECK(code == 0, "codice di uscita atteso 0, trovato %d", code);
+    sb_free(&o4);
+    sb_free(&e4);
+
+    /* stesso comando, ma senza i thread di lettura: la cattura deve fallire in
+     * modo controllato (figlio terminato e raccolto), non restare bloccata */
+    gitdata_set_reader_thread_hook(reader_thread_always_fails);
+    StrBuf o5, e5;
+    sb_init(&o5);
+    sb_init(&e5);
+    err[0] = '\0';
+    ok = gitdata_capture(both, &o5, &e5, &code, err, sizeof err);
+    CHECK(!ok, "senza thread di lettura la cattura deve fallire");
+    CHECK(strstr(err, "thread") != NULL,
+          "il messaggio deve parlare del thread di lettura: '%s'", err);
+    CHECK(strstr(err, "terminato") != NULL,
+          "il messaggio deve dire che il processo e' stato terminato: '%s'", err);
+    sb_free(&o5);
+    sb_free(&e5);
+    gitdata_set_reader_thread_hook(NULL);
+    remove(out_file);
+    remove(err_file);
+
+    /* aggancio rimosso: la cattura torna a funzionare */
+    sb_init(&out);
+    sb_init(&errout);
+    const char *simple[] = { "cmd.exe", "/c", "echo di nuovo", NULL };
+    ok = gitdata_capture(simple, &out, &errout, &code, err, sizeof err);
+    CHECK(ok, "dopo aver rimosso l'aggancio la cattura deve riuscire: %s", err);
+    CHECK(strstr(out.data, "di nuovo") != NULL, "output atteso");
+    sb_free(&out);
+    sb_free(&errout);
 }
 
 int main(int argc, char **argv)

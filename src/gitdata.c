@@ -12,6 +12,7 @@
 
 #include <windows.h>
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,10 +98,15 @@ static char *wide_to_utf8(const wchar_t *w)
 /* Thread di lettura: consuma una pipe fino alla chiusura. Con un thread per
  * pipe non esiste attesa reciproca: se una pipe si riempie mentre l'altra
  * viene letta, l'altra la drena subito, quindi il figlio non si blocca mai in
- * scrittura (il classico deadlock delle due pipe). */
+ * scrittura (il classico deadlock delle due pipe).
+ *
+ * `failed` distingue la fine normale (pipe chiusa o rotta, cioe' lo scrittore
+ * e' uscito) da un vero errore di lettura: nel secondo caso l'output raccolto
+ * sarebbe incompleto e va segnalato. */
 typedef struct {
     HANDLE pipe;
     StrBuf *out;
+    bool failed;
 } PipeReader;
 
 static DWORD WINAPI pipe_reader(LPVOID param)
@@ -109,20 +115,85 @@ static DWORD WINAPI pipe_reader(LPVOID param)
     for (;;) {
         char tmp[65536];
         DWORD got = 0;
-        if (!ReadFile(r->pipe, tmp, sizeof tmp, &got, NULL) || got == 0)
-            break;
+        if (!ReadFile(r->pipe, tmp, sizeof tmp, &got, NULL)) {
+            DWORD e = GetLastError();
+            if (e != ERROR_BROKEN_PIPE && e != ERROR_HANDLE_EOF)
+                r->failed = true; /* lettura fallita: output incompleto */
+            break;                /* pipe chiusa o rotta: fine */
+        }
+        if (got == 0)
+            break; /* scrittore chiuso: EOF */
         sb_appendn(r->out, tmp, got);
     }
     return 0;
 }
 
+/* Aggancio per i test: se impostato sostituisce la creazione del thread di
+ * lettura, cosi' da esercitare il percorso in cui la lettura concorrente non e'
+ * disponibile (ritornando NULL si simula il fallimento di CreateThread).
+ * NULL ripristina il comportamento normale. */
+static GitdataReaderThreadHook g_reader_hook = NULL;
+
+void gitdata_set_reader_thread_hook(GitdataReaderThreadHook hook)
+{
+    g_reader_hook = hook;
+}
+
+static HANDLE start_reader(PipeReader *r)
+{
+    if (g_reader_hook)
+        return (HANDLE)g_reader_hook(r);
+    return CreateThread(NULL, 0, pipe_reader, r, 0, NULL);
+}
+
+/* Messaggio d'errore (err puo' essere NULL). */
+static void set_err(char *err, size_t err_size, const char *fmt, ...)
+{
+    if (!err || err_size == 0)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(err, err_size, fmt, ap);
+    va_end(ap);
+}
+
+/* Chiude un handle se valido (usata sui percorsi di errore). */
+static void close_if(HANDLE h)
+{
+    if (h && h != INVALID_HANDLE_VALUE)
+        CloseHandle(h);
+}
+
+/* Raccoglie il processo e chiude tutti gli handle: usata su ogni percorso di
+ * uscita, cosi' nessun handle resta aperto e il figlio non resta attivo. */
+static void reap_child(PROCESS_INFORMATION *pi)
+{
+    if (pi->hProcess) {
+        WaitForSingleObject(pi->hProcess, INFINITE);
+        CloseHandle(pi->hThread);
+        CloseHandle(pi->hProcess);
+        pi->hThread = NULL;
+        pi->hProcess = NULL;
+    }
+}
+
 /* Esegue `argv` (argv[0] = programma, es. "git"; terminato da NULL).
- * Cattura stdout e stderr. Ritorna false solo se il processo non e' partito
- * o la lettura e' fallita; il codice di uscita del processo finisce in
- * exit_code. */
+ * Cattura stdout e stderr.
+ *
+ * Ritorna true quando l'output e' stato raccolto per intero (il codice di
+ * uscita del processo finisce in exit_code, anche se diverso da zero).
+ * Ritorna false, senza lasciare processi sospesi ne' handle aperti, se:
+ *  - il processo non e' partito;
+ *  - non si e' potuto creare un thread per pipe: in questo caso il figlio viene
+ *    terminato e raccolto, le pipe svuotate fino alla fine e l'errore
+ *    segnalato, invece di attendere una lettura che non puo' avvenire;
+ *  - la lettura di una pipe e' fallita (output incompleto). */
 bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
                      int *exit_code, char *err, size_t err_size)
 {
+    if (exit_code)
+        *exit_code = -1;
+
     StrBuf cmdline;
     sb_init(&cmdline);
     for (size_t i = 0; argv[i]; i++)
@@ -130,7 +201,7 @@ bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
     wchar_t *wcmd = utf8_to_wide(cmdline.data);
     sb_free(&cmdline);
     if (!wcmd) {
-        snprintf(err, err_size, "conversione della riga di comando fallita");
+        set_err(err, err_size, "conversione della riga di comando fallita");
         return false;
     }
 
@@ -142,7 +213,12 @@ bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
     if (!CreatePipe(&out_r, &out_w, &sa, 0) ||
         !CreatePipe(&err_r, &err_w, &sa, 0)) {
         DWORD e = GetLastError();
-        snprintf(err, err_size, "CreatePipe fallita (errore %lu)", (unsigned long)e);
+        set_err(err, err_size, "CreatePipe fallita (errore %lu)", (unsigned long)e);
+        /* chiude anche le pipe create solo in parte */
+        close_if(out_r);
+        close_if(out_w);
+        close_if(err_r);
+        close_if(err_w);
         free(wcmd);
         return false;
     }
@@ -165,55 +241,86 @@ bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
     free(wcmd);
     CloseHandle(out_w);
     CloseHandle(err_w);
-    if (nul_in != INVALID_HANDLE_VALUE)
-        CloseHandle(nul_in);
+    close_if(nul_in);
 
     if (!ok) {
-        CloseHandle(out_r);
-        CloseHandle(err_r);
+        close_if(out_r);
+        close_if(err_r);
         if (spawn_err == ERROR_FILE_NOT_FOUND || spawn_err == ERROR_PATH_NOT_FOUND)
-            snprintf(err, err_size, "eseguibile 'git' non trovato nel PATH di sistema");
+            set_err(err, err_size, "eseguibile 'git' non trovato nel PATH di sistema");
         else
-            snprintf(err, err_size, "avvio di git fallito (errore %lu)", (unsigned long)spawn_err);
+            set_err(err, err_size, "avvio di git fallito (errore %lu)",
+                    (unsigned long)spawn_err);
         return false;
     }
 
     /* Un thread per pipe: nessuna attesa reciproca, quindi nessun blocco
      * quando una delle due pipe si riempie. */
-    PipeReader ro = { out_r, out };
-    PipeReader re = { err_r, errout };
-    HANDLE to = CreateThread(NULL, 0, pipe_reader, &ro, 0, NULL);
-    HANDLE te = CreateThread(NULL, 0, pipe_reader, &re, 0, NULL);
-    if (to && te) {
-        HANDLE both[2] = { to, te };
-        WaitForMultipleObjects(2, both, TRUE, INFINITE);
-    } else {
-        /* fallback senza thread: lettura sequenziale (le pipe sono piccole in
-         * questo caso, il figlio non e' bloccato) */
-        if (to) {
-            WaitForSingleObject(to, INFINITE);
-        } else {
+    PipeReader ro = { out_r, out, false };
+    PipeReader re = { err_r, errout, false };
+    HANDLE to = start_reader(&ro);
+    HANDLE te = start_reader(&re);
+
+    if (!to || !te) {
+        /* Senza lettura concorrente non si puo' attendere: il figlio potrebbe
+         * restare bloccato su una pipe piena mentre l'altra non viene letta.
+         * Viene quindi terminato e raccolto, le due pipe vengono svuotate fino
+         * alla fine (il produttore e' morto, quindi non possono piu' bloccare)
+         * e l'errore viene segnalato: meglio un errore esplicito che un
+         * output troncato usato come se fosse completo. */
+        DWORD thread_err = GetLastError();
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        if (to)
+            WaitForSingleObject(to, INFINITE); /* il figlio e' morto: arriva a EOF */
+        else
             pipe_reader(&ro);
-        }
-        if (te) {
+        if (te)
             WaitForSingleObject(te, INFINITE);
-        } else {
+        else
             pipe_reader(&re);
-        }
+        close_if(to);
+        close_if(te);
+        close_if(out_r);
+        close_if(err_r);
+        reap_child(&pi);
+        set_err(err, err_size,
+                "lettura di git non disponibile (thread di lettura non creato, "
+                "errore %lu): il processo e' stato terminato",
+                (unsigned long)thread_err);
+        return false;
     }
-    if (to)
-        CloseHandle(to);
-    if (te)
-        CloseHandle(te);
+
+    HANDLE both[2] = { to, te };
+    bool wait_ok = true;
+    if (WaitForMultipleObjects(2, both, TRUE, INFINITE) == WAIT_FAILED) {
+        /* i thread vanno comunque raccolti prima di chiudere le pipe: attesa
+         * individuale e segnalazione del fallimento */
+        WaitForSingleObject(to, INFINITE);
+        WaitForSingleObject(te, INFINITE);
+        wait_ok = false;
+    }
+    close_if(to);
+    close_if(te);
+    close_if(out_r);
+    close_if(err_r);
+
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
-    *exit_code = (int)code;
+    if (exit_code)
+        *exit_code = (int)code;
+    reap_child(&pi);
 
-    CloseHandle(out_r);
-    CloseHandle(err_r);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    if (!wait_ok) {
+        set_err(err, err_size, "attesa dei thread di lettura fallita (errore %lu)",
+                (unsigned long)GetLastError());
+        return false;
+    }
+    if (ro.failed || re.failed) {
+        set_err(err, err_size, "lettura dell'output di git incompleta");
+        return false;
+    }
     return true;
 }
 

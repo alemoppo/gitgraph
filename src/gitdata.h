@@ -69,9 +69,20 @@ void gitdata_build_cmdline(const char *const *argv, char *out, size_t out_size);
 /* Esegue un programma catturando stdout e stderr in due buffer distinti, senza
  * shell. La lettura avviene con un thread per pipe: una pipe piena non puo'
  * bloccare il figlio (e quindi non puo' bloccare chi legge). `err` riceve un
- * messaggio solo se il processo non e' partito. Ritorna false in quel caso. */
+ * messaggio quando la cattura non e' riuscita (processo non partito, thread di
+ * lettura non creato, lettura incompleta); Ritorna false in quel caso, senza
+ * lasciare processi sospesi. Un codice di uscita diverso da zero non e' un
+ * errore: finisce in exit_code e il valore restituito resta true. */
 bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
                      int *exit_code, char *err, size_t err_size);
+
+/* Aggancio per i test: se non NULL sostituisce la creazione del thread di
+ * lettura delle pipe (l'argomento e' un puntatore opaco interno, il valore
+ * restituito e' l'handle del thread). Ritornando NULL si simula il fallimento
+ * di CreateThread e si verifica che il processo figlio venga terminato e
+ * raccolto invece di restare bloccato. */
+typedef void *(*GitdataReaderThreadHook)(void *reader);
+void gitdata_set_reader_thread_hook(GitdataReaderThreadHook hook);
 
 /* Helper di visualizzazione: copia i primi n caratteri dell'hash. */
 void gitdata_short_hash(const char *hash, size_t n, char out[16]);
