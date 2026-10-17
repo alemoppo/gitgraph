@@ -66,18 +66,32 @@ Commenti su righe dedicate (`#` o `;`), sezioni nell'ordine che si preferisce,
 # trunk e linee principali, nell'ordine di gerarchia
 [long-lived]
 main
-release/*          # '*' = qualsiasi carattere, senza attraversare '/'
+release/hotfix-*     # con piu' righe che corrispondono, vale la prima
+release/*            # '*' = qualsiasi sequenza di caratteri, '/' compreso
 
 [parents]
 feature/x = main   # dichiarazioni esplicite, senza wildcard
 bugfix/1 = release/1.0
 ```
 
-- **`[long-lived]`**: righe di nomi, nell'ordine di gerarchia usato dal
-  modello e dal layout. I pattern con `*` sono espansi sui branch esistenti
-  (locali e remoti) conservando l'ordine della lista; `release/*` non
-  cattura `release/1.0/hotfix`. Un nome remoto vale come il branch locale
-  equivalente (`origin/main` = `main`, sono lo stesso specchio).
+- **`[long-lived]`**: righe di nomi o di pattern, nell'ordine di gerarchia
+  usato dal modello e dal layout. L'unico carattere speciale è `*`, che sta
+  per "qualsiasi sequenza di caratteri": nei nomi dei branch la barra non è
+  un separatore di significato, quindi `release/*` arriva anche a
+  `release/2026/q1`. Non ci sono altre espressioni (niente `?`, niente
+  espressioni regolari).
+  - i nomi raccolti da una riga sono ordinati **naturalmente**: le sequenze
+    di cifre si confrontano come numeri, così `release/1.0`, `release/2.0`,
+    `release/10.0` (non `1.0`, `10.0`, `2.0`);
+  - se un branch corrisponde a più righe **vale la prima**: con
+    `release/hotfix-*` prima di `release/*`, `release/hotfix-3` resta dove
+    l'ha messo la prima riga e le successive non lo spostano né lo duplicano;
+  - un riferimento remoto conta per il suo **nome canonico**:
+    `origin/release/2.0` corrisponde a `release/2.0` (è lo stesso ramo di
+    `release/2.0`); nel modello un remoto con la stessa punta del branch
+    locale è uno **specchio** (relazione certa), mentre un remoto con punta
+    diversa resta autonomo e ne conserva la genealogia dedotta: dal solo nome
+    non si deduce una relazione di tracking.
 - **`[parents]`**: override manuali con precedenza sull'euristica; stato
   `configurato`, non un fatto ricavato da Git. Niente wildcard.
 
@@ -107,18 +121,33 @@ padre, stato e motivazione. `--full` mostra i messaggi di commit completi.
   genitori dalla punta del branch, che appartiene alla *regione propria* di
   un'altra famiglia di branch. Non e' la raggiungibilita' generica: dopo un
   merge i commit del branch sono raggiungibili da altri, ma la catena dei primi
-  genitori non li attraversa, quindi il fork resta quello vero.
+  genitori non li attraversa, quindi il fork resta quello vero. Il calcolo non
+  dipende dall'ordine dei nomi: un branch che incontra la **punta** di un
+  altro ramo si e' diramato li'; i tronchi (long-lived) proseguono sempre, per
+ che non possono essere una diramazione di un altro ramo.
+- **Ogni riferimento conserva la sua punta**: due riferimenti con lo stesso
+  nome canonico ma punte diverse (`main` e `origin/main` indietro di un
+  commit) restano due riferimenti distinti, ciascuno con la propria punta; lo
+  **specchio** si dichiara solo quando la punta coincide davvero, ed e' l'unico
+  caso di relazione `certo` fra riferimenti.
 - **Primo commit proprio** (`first_own_commit`): il piu' vecchio commit
   proprio del branch, cioe' il figlio del punto di diramazione; serve a
   ordinare i fratelli nel layout. Assente per i branch assorbiti o
   fast-forward.
-- **Stati del padre**: `certo` (fatto ricavato da Git: remote-tracking di un
-  branch locale), `configurato` (dichiarato in `[parents]` di `graph.cfg`, non
-  un fatto dedotto), `dedotto` (una sola ipotesi plausibile), `ambiguo`
-  (piu' ipotesi indistinguibili: non si inventa un padre), `nessuno`.
-- **Gruppi di alias**: piu' branch sulla stessa punta formano un unico gruppo
-  (stessa catena, quindi stesso padre dedotto); l'ordine interno tra loro non
-  e' determinabile e la motivazione lo dichiara.
+- **Genealogia non determinabile**: quando nessun branch puo' essere il padre
+  (nessun ramo piu' antico condiviso, o nessun candidato sopravvive ai
+  filtri), il modello lo dichiara: stato `nessuno`, messaggio che lo dice e
+  `genealogy_undetermined` a `true` nel modello.
+- **Stati del padre**: `certo` (fatto ricavato da Git: uno specchio che punta
+  allo stesso commit di un branch locale), `configurato` (dichiarato in
+  `[parents]` di `graph.cfg`, non un fatto dedotto), `dedotto` (una sola
+  ipotesi plausibile; quando il punto di diramazione appartiene alla regione
+  propria di un solo candidato, e' quello il padre), `ambiguo` (piu' ipotesi
+  indistinguibili: non si inventa un padre), `nessuno`.
+- **Gruppi di alias**: piu' riferimenti sulla stessa punta formano una
+  famiglia (stessa catena, quindi stesso padre dedotto); fra piu' branch
+  **locali** sulla stessa punta resta ambiguo quale sia il nome del padre, e
+  la motivazione lo dichiara.
 - **Long-lived**: sono il tronco o le linee principali; non hanno padre
   dedotto, ne' punto di diramazione, ne' candidati.
 - **Date**: usate solo come spareggio quando la struttura non decide (per
@@ -137,7 +166,9 @@ lunghezza della catena dei primi genitori della famiglia `g`:
   passata sulle catene);
 - matrice di relazioni fra famiglie: `O(S L_g + G^2)`;
 - bitset di raggiungibilita': `O(S |raggiungibili|)`;
-- deduzione dei padri: una sola passata `O(G^2 + S L_g)`.
+- deduzione dei padri: una sola passata `O(G^2 + S L_g)`;
+- controllo delle relazioni circolari: `O(R)` sui grafi aciclici (mappa
+  nome->nodo e memoizzazione dei nodi gia' verificati).
 
 Nessun cammino viene ripercorso per ogni coppia di branch: il costo cresce
 linearmente con la dimensione del repository, non con il prodotto
@@ -151,21 +182,27 @@ costruzione del modello).
 
     ctest --test-dir build --output-on-failure
 
-Otto test, nessuno con finestra:
+Dieci test, nessuno con finestra:
 
 1. `make_test_repo` genera il repository di prova;
 2. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
-   per data, override, long-lived e determinismo;
-3. `config` verifica `graph.cfg`: sezioni, commenti, BOM/CRLF, wildcard e
-   ordine di espansione, tronco implicito, casi di errore che rifiutano il
-   file, avvisi che lo lasciano valido, ciclo di override e uso end-to-end
-   dentro il repository di prova (override → stato `configurato`,
-   long-lived senza fork né candidati);
+   per data, override, long-lived, determinismo, quoting degli argomenti e
+   cattura di stdout/stderr senza blocco (pipe riempite oltre la capacita');
+3. `config` verifica `graph.cfg`: sezioni, commenti, BOM/CRLF, wildcard con
+   ordine naturale, barra attraversata, priorita' della prima riga che
+   corrisponde, riferimenti remoti per nome canonico, tronco implicito, casi di
+   errore che rifiutano il file, avvisi che lo lasciano valido, ciclo di
+   override e uso end-to-end dentro il repository di prova (override → stato
+   `configurato`, long-lived senza fork né candidati, remoto con punta diversa
+   che mantiene la genealogia dedotta);
 4. `dump_smoke` esegue lo strumento di dump;
 5. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
    3 s;
 6. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
-   30 s (determinismo verificato anche sul repository grande).
+   30 s (determinismo verificato anche sul repository grande);
+7. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
+   15 s, con ogni branch nato dal precedente (catena profonda): verifica il
+   controllo delle relazioni circolari e l'ordinamento dei padri.
 
 I repository di scala sono sintetici e deterministici: `tests/make_scale_repo.c`
 genera su stdout uno stream per `git fast-import` (commit su `main`, un
@@ -177,5 +214,14 @@ costruzione del modello, non la generazione.
 Il repository di prova contiene: merge `--no-ff`, fast-forward, branch
 cancellato, gruppo di alias (piu' branch sullo stesso commit) e un branch
 figlio ambiguo tra i membri del gruppo, gruppo isolato con spareggio per data,
-branch con slash, tag annotati e leggeri multipli, uno stash (da escludere), un
-remote-tracking speculare e un messaggio UTF-8 multi-riga.
+riferimenti remoti con punte diverse (`origin/main`, `upstream/main`) piu' uno
+specchio provato e un alias con nome diverso, ramo nato dal **secondo
+genitore** di un merge, merge ripetuti dello stesso branch, storia **ribasata**
+(con il commit originale conservato in un altro branch), ramo **senza antenati**
+condivisi (genealogia non determinabile), branch con slash, tag annotati e
+leggeri multipli, uno stash (da escludere) e un messaggio UTF-8 multi-riga.
+
+Gli script `make_test_repo.bat` / `.sh` cancellano **solo** directory che
+hanno creato loro, riconosciute dal marcatore `.gitgraph_test_repo`: una
+directory esistente senza marcatore, la radice del filesystem, la home, la
+directory corrente e quella temporanea vengono rifiutate senza toccare nulla.
