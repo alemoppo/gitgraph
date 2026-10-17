@@ -10,13 +10,14 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
 
 - **Fase 1 (completata)**: lettura della storia, modello dei branch
   (padre/punto di diramazione/stato/motivazione), test automatici.
+- **Fase 2 (completata)**: parser di `graph.cfg` con wildcard e validazione.
 - Fasi successive: layout del grafo, disegno con SDL3/SDL3_ttf, interazione.
 
 ## Struttura
 
     src/util.h/.c      helper (allocazione, stringhe, esecuzione processi)
     src/gitdata.h/.c   lettura in sola lettura: commit e riferimenti
-    src/config.h/.c    configurazione (long-lived, override; parsing in fase 2)
+    src/config.h/.c    configurazione: parser di graph.cfg (wildcard, validazione)
     src/history.h/.c   modello dei branch dedotto dalla storia
     src/dump_main.c    strumento di ispezione testuale (gitgraph_dump)
     tests/             generatori del repo di prova e test automatici
@@ -53,6 +54,45 @@ Da MSYS2 UCRT64 (o da un prompt con gcc/cmake/ninja nel PATH):
 
 Eseguibili prodotti: `build/gitgraph_dump` (fase 1) e, nelle fasi
 successive, la GUI.
+
+## Configurazione: graph.cfg
+
+Il file è **facoltativo** e si legge da `<radice-repository>/graph.cfg`.
+Se non c'è vale il tronco implicito (`main`, altrimenti `master`).
+Commenti su righe dedicate (`#` o `;`), sezioni nell'ordine che si preferisce,
+` chiave = valore ` con spazi attorno all'`=` ammessi:
+
+```ini
+# trunk e linee principali, nell'ordine di gerarchia
+[long-lived]
+main
+release/*          # '*' = qualsiasi carattere, senza attraversare '/'
+
+[parents]
+feature/x = main   # dichiarazioni esplicite, senza wildcard
+bugfix/1 = release/1.0
+```
+
+- **`[long-lived]`**: righe di nomi, nell'ordine di gerarchia usato dal
+  modello e dal layout. I pattern con `*` sono espansi sui branch esistenti
+  (locali e remoti) conservando l'ordine della lista; `release/*` non
+  cattura `release/1.0/hotfix`. Un nome remoto vale come il branch locale
+  equivalente (`origin/main` = `main`, sono lo stesso specchio).
+- **`[parents]`**: override manuali con precedenza sull'euristica; stato
+  `configurato`, non un fatto ricavato da Git. Niente wildcard.
+
+**Validazione**: un errore rifiuta il file per intero (niente
+configurazione a metà) e lo strumento ripiega sul tronco implicito; un
+avviso lascia applicare il file. Sono errori: sezione sconosciuta, riga fuori
+da una sezione, intestazione malformata, `=` dentro `[long-lived]`, riga senza
+`=` o con un nome mancante in `[parents]`, wildcard in `[parents]`, nome non
+valido come riferimento Git, padre uguale al branch, doppio override per lo
+stesso branch. Sono avvisi: nome che non esiste nel repository, pattern senza
+corrispondenze, voce già long-lived, ciclo di override (in fase di modello i
+branch coinvolti diventano ambigui).
+
+`gitgraph_dump` stampa in testa l'ordine long-lived e gli override applicati,
+e la diagnostica su stderr.
 
 ## Uso
 
@@ -111,15 +151,20 @@ costruzione del modello).
 
     ctest --test-dir build --output-on-failure
 
-Sette test, nessuno con finestra:
+Otto test, nessuno con finestra:
 
 1. `make_test_repo` genera il repository di prova;
 2. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
    per data, override, long-lived e determinismo;
-3. `dump_smoke` esegue lo strumento di dump;
-4. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
+3. `config` verifica `graph.cfg`: sezioni, commenti, BOM/CRLF, wildcard e
+   ordine di espansione, tronco implicito, casi di errore che rifiutano il
+   file, avvisi che lo lasciano valido, ciclo di override e uso end-to-end
+   dentro il repository di prova (override → stato `configurato`,
+   long-lived senza fork né candidati);
+4. `dump_smoke` esegue lo strumento di dump;
+5. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
    3 s;
-5. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
+6. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
    30 s (determinismo verificato anche sul repository grande).
 
 I repository di scala sono sintetici e deterministici: `tests/make_scale_repo.c`
