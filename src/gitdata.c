@@ -26,11 +26,13 @@
  * della virgoletta di chiusura) vengono raddoppiate, cosi' un percorso che
  * termina con "\" non "mangia" la virgoletta. Gli argomenti vuoti sono
  * quotati; il resto passa invariato. */
-static void append_arg(StrBuf *sb, const char *arg)
+static void append_arg(StrBuf *sb, const char *arg, bool is_program_path)
 {
     if (sb->len)
         sb_append(sb, " ");
-    bool need_quote = (*arg == '\0');
+    /* il percorso del programma e' sempre quotato: forma robusta quando
+     * contiene spazi o caratteri speciali */
+    bool need_quote = (*arg == '\0') || (is_program_path && strchr(arg, '\\') != NULL);
     for (const char *p = arg; *p && !need_quote; p++) {
         if (*p == ' ' || *p == '\t' || *p == '"')
             need_quote = true;
@@ -70,7 +72,7 @@ void gitdata_build_cmdline(const char *const *argv, char *out, size_t out_size)
     StrBuf sb;
     sb_init(&sb);
     for (size_t i = 0; argv[i]; i++)
-        append_arg(&sb, argv[i]);
+        append_arg(&sb, argv[i], i == 0);
     snprintf(out, out_size, "%s", sb.data);
     sb_free(&sb);
 }
@@ -177,6 +179,77 @@ static void reap_child(PROCESS_INFORMATION *pi)
     }
 }
 
+/* Percorso assoluto di git.exe, risolto una sola volta e riusato.
+ *
+ * Perche' non basta passare "git" a CreateProcessW con lpApplicationName NULL:
+ * in quel caso Windows cerca il programma anche nella directory corrente, e il
+ * repository predefinito e' proprio la directory corrente, quindi un git.exe
+ * piazzato nella radice del repository verrebbe eseguito al posto del vero.
+ * Qui invece si percorrono le voci del PATH, se ne scelgono solo quelle
+ * assolute (quindi mai ".", mai una voce relativa, mai la directory corrente)
+ * e si prende il primo git.exe esistente. */
+static char g_git_path[MAX_PATH];
+static bool g_git_searched;
+
+/* Voce di PATH da considerare? Assoluta, non vuota, non "." e non ".." */
+static bool path_entry_is_usable(const wchar_t *entry)
+{
+    if (entry[0] == L'\0' || entry[0] == L'.')
+        return false;
+    if (entry[0] == L'\\' && entry[1] == L'\\')
+        return true; /* percorso UNC: assoluto */
+    return (entry[1] == L':' && (entry[2] == L'\\' || entry[2] == L'/'));
+}
+
+/* Risolve git.exe in un percorso assoluto. Ritorna false se non e' stato
+ * trovato in nessuna voce assoluta del PATH. */
+static bool resolve_git_path(char *out, size_t out_size)
+{
+    if (g_git_searched) {
+        if (!g_git_path[0])
+            return false;
+        snprintf(out, out_size, "%s", g_git_path);
+        return true;
+    }
+    g_git_searched = true;
+    g_git_path[0] = '\0';
+
+    wchar_t path[32768];
+    DWORD n = GetEnvironmentVariableW(L"PATH", path, (DWORD)(sizeof path / sizeof path[0]));
+    if (n == 0 || n >= sizeof path / sizeof path[0])
+        return false;
+
+    const wchar_t *p = path;
+    while (*p) {
+        const wchar_t *sep = wcschr(p, L';');
+        size_t len = sep ? (size_t)(sep - p) : wcslen(p);
+        if (len > 0 && len < MAX_PATH && path_entry_is_usable(p)) {
+            wchar_t candidate[MAX_PATH];
+            /* len + "\git.exe" + NUL */
+            if (len + 9 < MAX_PATH) {
+                memcpy(candidate, p, len * sizeof(wchar_t));
+                memcpy(candidate + len, L"\\git.exe", 9 * sizeof(wchar_t));
+                DWORD attr = GetFileAttributesW(candidate);
+                if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                    char *utf8 = wide_to_utf8(candidate);
+                    if (utf8) {
+                        snprintf(g_git_path, sizeof g_git_path, "%s", utf8);
+                        free(utf8);
+                        break;
+                    }
+                }
+            }
+        }
+        if (!sep)
+            break;
+        p = sep + 1;
+    }
+    if (!g_git_path[0])
+        return false;
+    snprintf(out, out_size, "%s", g_git_path);
+    return true;
+}
+
 /* Esegue `argv` (argv[0] = programma, es. "git"; terminato da NULL).
  * Cattura stdout e stderr.
  *
@@ -194,15 +267,44 @@ bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
     if (exit_code)
         *exit_code = -1;
 
+    /* Programma da eseguire: se e' "git", viene risolto una volta sola in un
+     * percorso assoluto (mai la directory corrente), passato come
+     * lpApplicationName e citato, quotato, in testa alla riga di comando. */
+    char app[MAX_PATH];
+    const char *app_arg = argv[0];
+    bool is_git = argv[0] && _stricmp(argv[0], "git") == 0;
+    if (is_git) {
+        if (!resolve_git_path(app, sizeof app)) {
+            set_err(err, err_size,
+                    "git non trovato nel PATH (cercato solo in voci assolute)");
+            return false;
+        }
+        app_arg = app;
+    } else {
+        snprintf(app, sizeof app, "%s", argv[0] ? argv[0] : "");
+        app_arg = app;
+    }
+
     StrBuf cmdline;
     sb_init(&cmdline);
-    for (size_t i = 0; argv[i]; i++)
-        append_arg(&cmdline, argv[i]);
+    append_arg(&cmdline, app_arg, true);
+    for (size_t i = 1; argv[i]; i++)
+        append_arg(&cmdline, argv[i], false);
     wchar_t *wcmd = utf8_to_wide(cmdline.data);
     sb_free(&cmdline);
     if (!wcmd) {
         set_err(err, err_size, "conversione della riga di comando fallita");
         return false;
+    }
+    wchar_t *wapp = NULL;
+    if (is_git) {
+        /* percorso assoluto gia' risolto: e' lui il lpApplicationName */
+        wapp = utf8_to_wide(app);
+        if (!wapp) {
+            set_err(err, err_size, "conversione del percorso del programma fallita");
+            free(wcmd);
+            return false;
+        }
     }
 
     SECURITY_ATTRIBUTES sa = {0};
@@ -236,8 +338,10 @@ bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
     si.hStdError = err_w;
 
     PROCESS_INFORMATION pi = {0};
-    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    /* lpApplicationName esplicito: niente ricerca nella directory corrente */
+    BOOL ok = CreateProcessW(wapp, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     DWORD spawn_err = ok ? 0 : GetLastError();
+    free(wapp);
     free(wcmd);
     CloseHandle(out_w);
     CloseHandle(err_w);
@@ -247,9 +351,10 @@ bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
         close_if(out_r);
         close_if(err_r);
         if (spawn_err == ERROR_FILE_NOT_FOUND || spawn_err == ERROR_PATH_NOT_FOUND)
-            set_err(err, err_size, "eseguibile 'git' non trovato nel PATH di sistema");
+            set_err(err, err_size, "%s non trovato nel PATH (risolto in '%s')",
+                    is_git ? "git" : "programma", app);
         else
-            set_err(err, err_size, "avvio di git fallito (errore %lu)",
+            set_err(err, err_size, "avvio di '%s' fallito (errore %lu)", app,
                     (unsigned long)spawn_err);
         return false;
     }

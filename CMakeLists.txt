@@ -62,6 +62,10 @@ target_link_libraries(test_config PRIVATE gg_core)
 # "git fast-import" (nessuna dipendenza dal core, serve solo la libc).
 add_executable(scale_repo_gen tests/make_scale_repo.c)
 
+# Finto git.exe per il test di sicurezza: scrive un file sentinella e fallisce.
+# Serve a verificare che gitgraph non lo esegua al posto del vero git.
+add_executable(fake_git tests/fake_git.c)
+
 # Repository di prova generato prima dei test (fixture ctest). La generazione
 # passa da uno script CMake che invoca make_test_repo.bat: ctest non lancia
 # mai "cmd /c" direttamente (quoting di cmd poco controllabile).
@@ -98,7 +102,9 @@ add_test(NAME scripts_guard
                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scripts_guard.cmake")
 set_tests_properties(scripts_guard PROPERTIES TIMEOUT 900)
 
-add_test(NAME core COMMAND test_core "${GG_TEST_REPO}")
+# Riceve anche il percorso del finto git.exe, per il test di sicurezza sulla
+# ricerca del programma.
+add_test(NAME core COMMAND test_core "${GG_TEST_REPO}" "$<TARGET_FILE:fake_git>")
 set_tests_properties(core PROPERTIES FIXTURES_REQUIRED testrepo)
 
 # graph.cfg: sintassi, wildcard, validazione e uso end-to-end sul repo di prova

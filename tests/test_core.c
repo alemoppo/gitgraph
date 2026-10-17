@@ -841,15 +841,111 @@ static void test_pipe_capture(void)
     sb_free(&errout);
 }
 
+/* ---------- sicurezza: ricerca di git.exe ---------- */
+
+/* Un git.exe nella directory corrente non deve mai essere eseguito: con
+ * lpApplicationName NULL Windows lo cerca anche li', e il repository
+ * predefinito e' proprio la directory corrente.
+ *
+ * Il test mette un finto git.exe (fake_git, che scrive un file sentinella)
+ * nella directory corrente e ricarica il repository: il caricamento deve
+ * riuscire e il sentinella non deve comparire. */
+static void test_git_lookup_safety(const char *fake_git_path, const char *repo_path)
+{
+    if (!fake_git_path || !*fake_git_path) {
+        printf("saltato: percorso del finto git.exe non fornito\n");
+        return;
+    }
+    char temp[MAX_PATH];
+    DWORD tn = GetTempPathA(sizeof temp, temp);
+    bool temp_ok = (tn > 0 && tn < sizeof temp);
+    CHECK(temp_ok, "percorso temporaneo non ottenibile");
+    if (!temp_ok)
+        return;
+    char work[MAX_PATH];
+    snprintf(work, sizeof work, "%sgg_git_lookup", temp);
+    char fake[MAX_PATH], sentinel[MAX_PATH];
+    snprintf(fake, sizeof fake, "%s\\git.exe", work);
+    snprintf(sentinel, sizeof sentinel, "%s\\git_runs.txt", work);
+    remove(sentinel);
+    CreateDirectoryA(work, NULL);
+    bool copied = CopyFileA(fake_git_path, fake, TRUE) != 0;
+    CHECK(copied, "copia del finto git.exe fallita in %s", work);
+    if (!copied)
+        return;
+
+    char cwd[MAX_PATH];
+    DWORD cn = GetCurrentDirectoryA(sizeof cwd, cwd);
+    CHECK(cn > 0 && cn < sizeof cwd, "directory corrente non ottenibile");
+    /* il percorso del repository deve essere assoluto: dopo il cambio di
+     * directory uno relativo non vale piu' */
+    char repo_abs[MAX_PATH];
+    DWORD rn = GetFullPathNameA(repo_path, (DWORD)sizeof repo_abs, repo_abs, NULL);
+    CHECK(rn > 0 && rn < sizeof repo_abs, "percorso del repository non assolutizzato");
+    if (rn == 0 || rn >= sizeof repo_abs) {
+        remove(fake);
+        RemoveDirectoryA(work);
+        return;
+    }
+    CHECK(SetCurrentDirectoryA(work) != 0, "cambio di directory fallito");
+
+    /* La ricerca avviene solo nelle voci assolute del PATH: qui la directory
+     * corrente non e' nel PATH, come nella situazione reale (il pericolo e'
+     * che Windows la consideri comunque). */
+    GitData d;
+    char err[1024];
+    bool ok = gitdata_load(&d, repo_abs, err, sizeof err);
+    SetCurrentDirectoryA(cwd);
+    CHECK(ok, "caricamento con git.exe finto nella cwd fallito: %s", err);
+    if (!ok) {
+        remove(sentinel);
+        remove(fake);
+        RemoveDirectoryA(work);
+        return;
+    }
+    CHECK(d.commit_count > 0, "caricamento con git.exe finto: nessun commit");
+    gitdata_free(&d);
+
+    CHECK(GetFileAttributesA(sentinel) == INVALID_FILE_ATTRIBUTES,
+          "il finto git.exe e' stato eseguito: sentinella %s presente", sentinel);
+
+    /* controllo positivo, con un sentinella tutto suo: il finto git.exe, eseguito
+     * davvero, lascia il segno. Dimostra che il test non e' vacuo, cioe' che il
+     * file sopra verrebbe scritto se il finto programma venisse eseguito al
+     * posto del vero git. */
+    char positive[MAX_PATH];
+    snprintf(positive, sizeof positive, "%s\\controllo_positivo.txt", work);
+    remove(positive);
+    SetEnvironmentVariableA("GG_FAKE_GIT_SENTINEL", positive);
+    StrBuf so, se;
+    sb_init(&so);
+    sb_init(&se);
+    int code = -1;
+    const char *fake_argv[] = { fake, NULL };
+    bool ran = gitdata_capture(fake_argv, &so, &se, &code, err, sizeof err);
+    CHECK(ran, "il finto git.exe non e' nemmeno partito: %s", err);
+    CHECK(GetFileAttributesA(positive) != INVALID_FILE_ATTRIBUTES,
+          "controllo positivo fallito: il finto git.exe non ha scritto nulla");
+    SetEnvironmentVariableA("GG_FAKE_GIT_SENTINEL", NULL);
+    sb_free(&so);
+    sb_free(&se);
+
+    remove(sentinel);
+    remove(positive);
+    remove(fake);
+    RemoveDirectoryA(work);
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
 #endif
     if (argc < 2) {
-        fprintf(stderr, "uso: test_core <percorso-repo-di-test>\n");
+        fprintf(stderr, "uso: test_core <percorso-repo-di-test> [percorso-finto-git]\n");
         return 2;
     }
+    const char *fake_git = (argc > 2) ? argv[2] : NULL;
 
     GitData data;
     char err[1024];
@@ -880,6 +976,7 @@ int main(int argc, char **argv)
     rc |= test_long_lived_custom(&data);
     test_cmdline_quoting();
     test_pipe_capture();
+    test_git_lookup_safety(fake_git, argv[1]);
     test_implicit_trunk_helper();
 
     gitdata_free(&data);
