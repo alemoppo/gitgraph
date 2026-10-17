@@ -81,9 +81,9 @@ static char *wide_to_utf8(const wchar_t *w)
     return s;
 }
 
-/* Legge tutto il contenuto disponibile di una pipe senza bloccarsi.
+/* Legge tutto il contenuto gia' disponibile di una pipe senza bloccarsi.
  * Ritorna false quando la pipe e' chiusa (EOF definitivo). */
-static bool drain_pipe(HANDLE h, StrBuf *out)
+static bool drain_available(HANDLE h, StrBuf *out)
 {
     for (;;) {
         DWORD avail = 0;
@@ -91,7 +91,7 @@ static bool drain_pipe(HANDLE h, StrBuf *out)
             return false; /* broken pipe: scrittore chiuso e buffer vuoto */
         if (avail == 0)
             return true; /* ancora aperta, niente dati pronti */
-        char tmp[4096];
+        char tmp[65536];
         DWORD want = avail < sizeof tmp ? avail : (DWORD)sizeof tmp;
         DWORD got = 0;
         if (!ReadFile(h, tmp, want, &got, NULL) || got == 0)
@@ -162,14 +162,31 @@ static bool run_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
         return false;
     }
 
+    /* Lettura delle due pipe. Su stdout si usa una lettura bloccante: e' il
+     * percorso veloce (nessuna attesa a vuoto, il buffer della pipe non
+     * limita il throughput); stderr viene sempre svuotata prima, per non
+     * lasciare git bloccato se scrive li'. */
     bool out_done = false, err_done = false;
     while (!out_done || !err_done) {
-        if (!out_done)
-            out_done = !drain_pipe(out_r, out);
         if (!err_done)
-            err_done = !drain_pipe(err_r, errout);
-        if (!out_done || !err_done)
-            WaitForSingleObject(pi.hProcess, 10);
+            err_done = !drain_available(err_r, errout);
+        if (!out_done) {
+            char tmp[65536];
+            DWORD got = 0;
+            if (!ReadFile(out_r, tmp, sizeof tmp, &got, NULL) || got == 0)
+                out_done = true;
+            else
+                sb_appendn(out, tmp, got);
+            continue; /* ricontrolla stderr */
+        }
+        if (!err_done) {
+            char tmp[65536];
+            DWORD got = 0;
+            if (!ReadFile(err_r, tmp, sizeof tmp, &got, NULL) || got == 0)
+                err_done = true;
+            else
+                sb_appendn(errout, tmp, got);
+        }
     }
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 1;
@@ -401,13 +418,30 @@ static bool parse_refs(const StrBuf *raw, GitData *d, char *err, size_t err_size
 
 /* ---------- API ---------- */
 
+/* Costruisce la mappa hash->indice e risolve gli hash dei genitori in indici,
+ * una sola volta dopo il parsing: la deduzione dei branch lavora poi solo su
+ * indici (nessuna scansione lineare). */
+static void build_indexes(GitData *d)
+{
+    d->by_hash = strmap_new();
+    for (size_t i = 0; i < d->commit_count; i++)
+        strmap_put(d->by_hash, d->commits[i].hash, (void *)(uintptr_t)(i + 1));
+    for (size_t i = 0; i < d->commit_count; i++) {
+        GitCommit *c = &d->commits[i];
+        c->parent_idx = xmalloc((c->parent_count ? c->parent_count : 1) * sizeof(size_t));
+        for (size_t k = 0; k < c->parent_count; k++) {
+            void *v = strmap_get(d->by_hash, c->parents[k]);
+            c->parent_idx[k] = v ? (size_t)(uintptr_t)v - 1 : (size_t)-1;
+        }
+    }
+}
+
 size_t gitdata_find_commit(const GitData *d, const char *hash)
 {
-    for (size_t i = 0; i < d->commit_count; i++) {
-        if (strcmp(d->commits[i].hash, hash) == 0)
-            return i;
-    }
-    return (size_t)-1;
+    if (!d->by_hash || !hash)
+        return (size_t)-1;
+    void *v = strmap_get(d->by_hash, hash);
+    return v ? (size_t)(uintptr_t)v - 1 : (size_t)-1;
 }
 
 void gitdata_short_hash(const char *hash, size_t n, char out[16])
@@ -451,6 +485,7 @@ static void free_partial(GitData *d)
         for (size_t k = 0; k < c->parent_count; k++)
             free(c->parents[k]);
         free(c->parents);
+        free(c->parent_idx);
         free(c->author);
         free(c->message);
     }
@@ -464,6 +499,7 @@ static void free_partial(GitData *d)
     free(d->head_branch);
     free(d->head_hash);
     free(d->repo_path);
+    strmap_free(d->by_hash);
     memset(d, 0, sizeof *d);
 }
 
@@ -587,6 +623,7 @@ bool gitdata_load(GitData *out, const char *path, char *err, size_t err_size)
         }
         if (!parse_commits(&so, out, err, err_size))
             goto fail;
+        build_indexes(out);
     }
 
     /* 6. marcatura HEAD sui branch locali */

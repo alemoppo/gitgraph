@@ -11,9 +11,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "util.h"
+
 typedef struct {
     char *hash;      /* hash completo, es. 40 esadecimali */
     char **parents;  /* hash completi dei genitori, nell'ordine di git */
+    size_t *parent_idx; /* indici dei genitori in GitData.commits; risolti
+                           una sola volta dopo il parsing (SIZE_MAX se il
+                           genitore non compare nel log, es. clone shallow) */
     size_t parent_count;
     char *author;    /* nome autore (UTF-8) */
     int64_t date;    /* data committer (secondi unix) */
@@ -42,6 +47,7 @@ typedef struct {
     char *head_branch;    /* branch corrente, o NULL se HEAD scollegata */
     char *head_hash;      /* hash di HEAD (NULL in repo senza commit) */
     char *repo_path;      /* percorso usato per invocare git (assoluto) */
+    StrMap *by_hash;      /* hash -> indice commit, interno */
 } GitData;
 
 /* Carica commit e riferimenti del repository in `path` (NULL = directory
@@ -50,7 +56,8 @@ typedef struct {
 bool gitdata_load(GitData *out, const char *path, char *err, size_t err_size);
 void gitdata_free(GitData *data);
 
-/* Indice del commit con quell'hash, o SIZE_MAX se assente. */
+/* Indice del commit con quell'hash, o SIZE_MAX se assente. O(1): usa la mappa
+ * costruita al caricamento. */
 size_t gitdata_find_commit(const GitData *d, const char *hash);
 
 /* Helper di visualizzazione: copia i primi n caratteri dell'hash. */

@@ -59,16 +59,78 @@ successive, la GUI.
     build/gitgraph_dump.exe [--full] [percorso-repo]
 
 Stampa commit (ordine topologico), riferimenti e modello dei branch con
-padre, stato (`certo`/`dedotto`/`ambiguo`/`nessuno`) e motivazione.
-`--full` mostra i messaggi di commit completi.
+padre, stato e motivazione. `--full` mostra i messaggi di commit completi.
+
+## Modello dei branch (sintesi)
+
+- **Punto di diramazione**: il primo commit, risalendo la catena dei primi
+  genitori dalla punta del branch, che appartiene alla *regione propria* di
+  un'altra famiglia di branch. Non e' la raggiungibilita' generica: dopo un
+  merge i commit del branch sono raggiungibili da altri, ma la catena dei primi
+  genitori non li attraversa, quindi il fork resta quello vero.
+- **Primo commit proprio** (`first_own_commit`): il piu' vecchio commit
+  proprio del branch, cioe' il figlio del punto di diramazione; serve a
+  ordinare i fratelli nel layout. Assente per i branch assorbiti o
+  fast-forward.
+- **Stati del padre**: `certo` (fatto ricavato da Git: remote-tracking di un
+  branch locale), `configurato` (dichiarato in `[parents]` di `graph.cfg`, non
+  un fatto dedotto), `dedotto` (una sola ipotesi plausibile), `ambiguo`
+  (piu' ipotesi indistinguibili: non si inventa un padre), `nessuno`.
+- **Gruppi di alias**: piu' branch sulla stessa punta formano un unico gruppo
+  (stessa catena, quindi stesso padre dedotto); l'ordine interno tra loro non
+  e' determinabile e la motivazione lo dichiara.
+- **Long-lived**: sono il tronco o le linee principali; non hanno padre
+  dedotto, ne' punto di diramazione, ne' candidati.
+- **Date**: usate solo come spareggio quando la struttura non decide (per
+  esempio fra diramazioni nate dallo stesso commit); ogni decisione basata su
+  una data dichiara nella motivazione che e' poco affidabile con rebase.
+- Dettagli e dimostrazione dei filtri: `src/history.h` e l'intestazione di
+  `src/history.c`.
+
+### Complessita'
+
+Con `C` commit, `R` riferimenti, `G <= R` famiglie di branch e `L_g` la
+lunghezza della catena dei primi genitori della famiglia `g`:
+
+- indici dei genitori e mappa hash -> indice: `O(C + genitori)`, una volta;
+- appartenenza dei commit e punti di diramazione: `O(S L_g)` (una sola
+  passata sulle catene);
+- matrice di relazioni fra famiglie: `O(S L_g + G^2)`;
+- bitset di raggiungibilita': `O(S |raggiungibili|)`;
+- deduzione dei padri: una sola passata `O(G^2 + S L_g)`.
+
+Nessun cammino viene ripercorso per ogni coppia di branch: il costo cresce
+linearmente con la dimensione del repository, non con il prodotto
+`riferimenti x lunghezza delle catene`. Misure su questa macchina (Release,
+gcc 16.2 MSYS2 UCRT64, `gitgraph_dump` su repository sintetici identici a
+quelli dei test di scala): 22 riferimenti/392 commit 0,29 s, 84/1561 0,28 s,
+266/4035 0,31 s, 363/10.000 0,37 s, 1130/50.000 1,02 s (di cui 0,35 s di
+costruzione del modello).
 
 ## Test
 
     ctest --test-dir build --output-on-failure
 
-I test usano un repository di prova isolato e ripetibile generato da
-`tests/make_test_repo.bat` (Windows) o `tests/make_test_repo.sh`.
+Sette test, nessuno con finestra:
+
+1. `make_test_repo` genera il repository di prova;
+2. `core` verifica parsing, topologia, modello dei branch, alias, spareggio
+   per data, override, long-lived e determinismo;
+3. `dump_smoke` esegue lo strumento di dump;
+4. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
+   3 s;
+5. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
+   30 s (determinismo verificato anche sul repository grande).
+
+I repository di scala sono sintetici e deterministici: `tests/make_scale_repo.c`
+genera su stdout uno stream per `git fast-import` (commit su `main`, un
+`feature/<i>` ogni N commit, un `sub/<i>` mergiato nel proprio feature e un
+merge `--no-ff` in `main` ogni due feature), `tests/make_scale_repo.cmake` lo
+importa con `git fast-import`. Il budget misura solo lettura del repository e
+costruzione del modello, non la generazione.
+
 Il repository di prova contiene: merge `--no-ff`, fast-forward, branch
-cancellato, caso ambiguo (piu' branch sullo stesso commit), branch con
-slash, tag annotati e leggeri multipli, uno stash (da escludere), un
+cancellato, gruppo di alias (piu' branch sullo stesso commit) e un branch
+figlio ambiguo tra i membri del gruppo, gruppo isolato con spareggio per data,
+branch con slash, tag annotati e leggeri multipli, uno stash (da escludere), un
 remote-tracking speculare e un messaggio UTF-8 multi-riga.

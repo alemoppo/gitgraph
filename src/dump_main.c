@@ -37,6 +37,8 @@ static const char *state_name(ParentState st)
     switch (st) {
     case PARENT_CERTAIN:
         return "certo";
+    case PARENT_CONFIGURED:
+        return "configurato";
     case PARENT_DEDUCED:
         return "dedotto";
     case PARENT_AMBIGUOUS:
@@ -145,6 +147,29 @@ int main(int argc, char **argv)
         printf("\n");
 
         printf("COMMIT (ordine topologico, 0 = piu' recente)\n");
+        /* riferimenti per commit in O(commit + riferimenti): indici precalcolati */
+        size_t ncommits = data.commit_count;
+        size_t *ref_counts = xcalloc(ncommits ? ncommits : 1, sizeof(size_t));
+        for (size_t ri = 0; ri < data.ref_count; ri++) {
+            size_t ci = gitdata_find_commit(&data, data.refs[ri].target);
+            if (ci != (size_t)-1)
+                ref_counts[ci]++;
+        }
+        size_t *ref_off = xmalloc((ncommits + 1) * sizeof(size_t));
+        ref_off[0] = 0;
+        for (size_t i = 0; i < ncommits; i++)
+            ref_off[i + 1] = ref_off[i] + ref_counts[i];
+        size_t *ref_items = xmalloc((data.ref_count ? data.ref_count : 1) * sizeof(size_t));
+        size_t *ref_cur = xmalloc((ncommits ? ncommits : 1) * sizeof(size_t));
+        memcpy(ref_cur, ref_off, ncommits * sizeof(size_t));
+        for (size_t ri = 0; ri < data.ref_count; ri++) {
+            size_t ci = gitdata_find_commit(&data, data.refs[ri].target);
+            if (ci != (size_t)-1)
+                ref_items[ref_cur[ci]++] = ri;
+        }
+        size_t head_idx = data.head_hash ? gitdata_find_commit(&data, data.head_hash)
+                                         : (size_t)-1;
+
         for (size_t i = 0; i < data.commit_count; i++) {
             const GitCommit *c = &data.commits[i];
             char sh[16], date[32], subj[96];
@@ -162,13 +187,11 @@ int main(int argc, char **argv)
             printf("  %s  %-14.14s  %s", date, c->author, subj);
             /* riferimenti su questo commit */
             bool first = true;
-            for (size_t ri = 0; ri < data.ref_count; ri++) {
-                if (strcmp(data.refs[ri].target, c->hash) == 0) {
-                    printf("%s[%s]", first ? "  " : " ", data.refs[ri].name);
-                    first = false;
-                }
+            for (size_t k = ref_off[i]; k < ref_off[i + 1]; k++) {
+                printf("%s[%s]", first ? "  " : " ", data.refs[ref_items[k]].name);
+                first = false;
             }
-            if (data.head_hash && strcmp(data.head_hash, c->hash) == 0)
+            if (i == head_idx)
                 printf("%sHEAD", first ? "  " : " ");
             printf("\n");
             if (full) {
@@ -184,6 +207,10 @@ int main(int argc, char **argv)
                 }
             }
         }
+        free(ref_counts);
+        free(ref_off);
+        free(ref_items);
+        free(ref_cur);
         printf("\n");
 
         printf("BRANCH (padre, stato, motivazione)\n");
@@ -194,11 +221,22 @@ int main(int argc, char **argv)
                 gitdata_short_hash(b->fork_hash, 8, fork);
             printf("  %-20s %s\n", b->name,
                    b->is_head ? "(HEAD)" : (b->mirror_of ? "(specchio)" : ""));
-            printf("      tipo: %s%s   padre: %-16s stato: %-8s fork: %s\n",
+            printf("      tipo: %s%s   padre: %-16s stato: %-11s fork: %s\n",
                    b->is_remote ? "remote" : "locale",
                    b->is_long_lived ? " long-lived" : "",
                    b->parent ? b->parent : "-",
                    state_name(b->state), fork);
+            if (b->first_own_commit) {
+                char fh[16];
+                gitdata_short_hash(b->first_own_commit, 8, fh);
+                printf("      primo commit proprio: %s\n", fh);
+            }
+            if (b->alias_count > 0) {
+                printf("      alias:");
+                for (size_t k = 0; k < b->alias_count; k++)
+                    printf(" %s", b->alias_members[k]);
+                printf("\n");
+            }
             printf("      motivo: %s\n", b->motivation);
             if (b->candidate_count > 0) {
                 printf("      candidati:");

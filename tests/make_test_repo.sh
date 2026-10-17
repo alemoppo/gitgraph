@@ -7,8 +7,9 @@
 #
 # Stesso contenuto della versione .bat: main(A,B,C), branch1 da B, branch2
 # da B2, merge --no-ff, fast-forward, branch cancellato dopo il merge, caso
-# ambiguo, branch con slash, piu' riferimenti sullo stesso commit, messaggio
-# con accenti e piu' righe, uno stash.
+# ambiguo, gruppo isolato con date come spareggio (oA/oC/oB da R), branch con
+# slash, piu' riferimenti sullo stesso commit, messaggio con accenti e piu'
+# righe, uno stash.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -98,6 +99,18 @@ commit "2026-01-02T11:20:00+0000" "D: tip di main"
 # piu' riferimenti sullo stesso commit (D)
 git -C "$REPO" tag tip-lw
 GIT_COMMITTER_DATE="2026-01-02T11:50:00+0000" git -C "$REPO" tag -a v2.0 -m "versione 2.0"
+
+# --- gruppo isolato con date come spareggio (oA, oC, oB figli di R) ---------
+# R e' la radice del gruppo; oA il piu' vecchio (12:02), oC 12:04, oB 12:06.
+# Serve a verificare lo spareggio per data e i messaggi che lo dichiarano.
+git -C "$REPO" checkout -q --orphan oA
+commit "2026-01-02T12:00:00+0000" "R: radice del gruppo isolato"
+commit "2026-01-02T12:02:00+0000" "OA: primo ramo isolato"
+git -C "$REPO" checkout -q -b oC HEAD~1
+commit "2026-01-02T12:04:00+0000" "OC: secondo ramo isolato"
+git -C "$REPO" checkout -q -b oB HEAD~1
+commit "2026-01-02T12:06:00+0000" "OB: terzo ramo isolato"
+git -C "$REPO" checkout -q main
 
 # --- stash: non deve comparire nel grafo ------------------------------------
 echo "lavoro in corso" > "$REPO/wip.txt"

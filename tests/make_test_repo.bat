@@ -8,10 +8,11 @@ rem %TEMP%\gitgraph_test_repo. Non tocca altri repository.
 rem
 rem Contenuto: main(A,B,C), branch1 da B, branch2 da B2, merge --no-ff,
 rem fast-forward, branch cancellato dopo il merge, caso ambiguo (due branch
-rem sullo stesso commit + un terzo creato da li'), branch con slash,
-rem piu' riferimenti sullo stesso commit, messaggio con accenti e piu' righe,
-rem uno stash (che il grafo non deve includere), un remote-tracking
-rem speculare a main (origin/main).
+rem sullo stesso commit + un terzo creato da li'), gruppo isolato con date
+rem come spareggio (oA/oC/oB da R), branch con slash, piu' riferimenti sullo
+rem stesso commit, messaggio con accenti e piu' righe, uno stash (che il
+rem grafo non deve includere), un remote-tracking speculare a main
+rem (origin/main).
 rem ---------------------------------------------------------------------------
 setlocal enableextensions
 set "REPO=%~1"
@@ -134,6 +135,26 @@ rem piu' riferimenti sullo stesso commit (D)
 git -C "%REPO%" tag tip-lw || goto :err
 set "GIT_COMMITTER_DATE=2026-01-02T11:50:00+0000"
 git -C "%REPO%" tag -a v2.0 -m "versione 2.0" || goto :err
+
+rem --- gruppo isolato con date come spareggio (oA, oC, oB figli di R) -------
+rem R e' la radice del gruppo; oA il piu' vecchio (12:02), oC 12:04, oB 12:06.
+rem Serve a verificare lo spareggio per data e i messaggi che lo dichiarano.
+git -C "%REPO%" checkout -q --orphan oA || goto :err
+set "GIT_AUTHOR_DATE=2026-01-02T12:00:00+0000"
+set "GIT_COMMITTER_DATE=%GIT_AUTHOR_DATE%"
+git -C "%REPO%" commit -q --allow-empty -m "R: radice del gruppo isolato" || goto :err
+set "GIT_AUTHOR_DATE=2026-01-02T12:02:00+0000"
+set "GIT_COMMITTER_DATE=%GIT_AUTHOR_DATE%"
+git -C "%REPO%" commit -q --allow-empty -m "OA: primo ramo isolato" || goto :err
+git -C "%REPO%" checkout -q -b oC HEAD~1 || goto :err
+set "GIT_AUTHOR_DATE=2026-01-02T12:04:00+0000"
+set "GIT_COMMITTER_DATE=%GIT_AUTHOR_DATE%"
+git -C "%REPO%" commit -q --allow-empty -m "OC: secondo ramo isolato" || goto :err
+git -C "%REPO%" checkout -q -b oB HEAD~1 || goto :err
+set "GIT_AUTHOR_DATE=2026-01-02T12:06:00+0000"
+set "GIT_COMMITTER_DATE=%GIT_AUTHOR_DATE%"
+git -C "%REPO%" commit -q --allow-empty -m "OB: terzo ramo isolato" || goto :err
+git -C "%REPO%" checkout -q main || goto :err
 
 rem --- stash: non deve comparire nel grafo -----------------------------------
 echo lavoro in corso > "%REPO%\wip.txt"

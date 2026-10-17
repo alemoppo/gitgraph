@@ -4,12 +4,14 @@
  * descrizione dei branch con padre, punto di diramazione, stato e motivo.
  *
  * Stati del padre:
- *  - CERTO:     dichiarato in [parents] di graph.cfg (o remote-tracking di un
- *               branch locale: "stesso branch").
- *  - DEDOTTO:   una sola ipotesi plausibile secondo l'euristica.
- *  - AMBIGUO:   piu' ipotesi non distinguibili, oppure due branch puntano allo
- *               stesso commit: non si inventa un padre.
- *  - NESSUNO:   nessun altro branch condivide la storia (radice indipendente).
+ *  - CERTO:       fatto ricavato da Git: remote-tracking di un branch locale
+ *                 ("stesso branch").
+ *  - CONFIGURATO: dichiarato in [parents] di graph.cfg (precedenza assoluta;
+ *                 non e' un fatto dedotto dalla storia).
+ *  - DEDOTTO:     una sola ipotesi plausibile secondo l'euristica.
+ *  - AMBIGUO:     piu' ipotesi non distinguibili (incluso il caso di piu'
+ *                 branch sulla stessa punta): non si inventa un padre.
+ *  - NESSUNO:     nessun branch padre individuabile.
  */
 #ifndef GG_HISTORY_H
 #define GG_HISTORY_H
@@ -22,6 +24,7 @@
 
 typedef enum {
     PARENT_CERTAIN,
+    PARENT_CONFIGURED,
     PARENT_DEDUCED,
     PARENT_AMBIGUOUS,
     PARENT_NONE
@@ -46,9 +49,14 @@ typedef struct {
     char *fork_hash;      /* hash completo del punto di diramazione, o NULL */
     size_t fork_pos;      /* posizione topologica del fork (0 = piu' recente),
                              SIZE_MAX se assente */
-    char *first_exclusive_hash; /* primo commit esclusivo (per l'ordinamento
-                                   dei figli in layout), o NULL */
-    size_t first_exclusive_pos; /* posizione topologica, SIZE_MAX se nessuno */
+    char *first_own_commit; /* primo commit proprio (figlio del punto di
+                               diramazione sulla catena dei primi genitori;
+                               per l'ordinamento dei figli nel layout), o NULL */
+    size_t first_own_pos;   /* posizione topologica, SIZE_MAX se nessuno */
+
+    char **alias_members; /* altri branch (nomi) sulla stessa punta: un unico
+                             gruppo di alias, in ordine alfabetico */
+    size_t alias_count;
 
     char **candidates;    /* candidati (ordinati), solo informativo */
     size_t candidate_count;

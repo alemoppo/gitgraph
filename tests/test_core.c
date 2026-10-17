@@ -4,8 +4,9 @@
  *
  * Copre: parsing di git log/for-each-ref, ordine dei genitori, ordine
  * topologico, esclusione dello stash, tag annotati dereferenziati, regole del
- * modello dei branch (padre, stato, fork, primo commit esclusivo, casi
- * ambigui), precedenza degli override, long-lived, determinismo.
+ * modello dei branch (padre, stato, fork, primo commit proprio, gruppo di
+ * alias, casi ambigui, spareggio per data dichiarato), precedenza degli
+ * override (stato 'configurato'), long-lived, determinismo.
  *
  * Esce con 0 se tutti i test passano, 1 se qualcuno fallisce, 2 su errore
  * di preparazione (repo assente o malformato).
@@ -126,6 +127,16 @@ static void compare_histories(const History *a, const History *b)
                   "determinismo: fork di '%s'", x->name);
         CHECK(x->candidate_count == y->candidate_count,
               "determinismo: candidati di '%s'", x->name);
+        CHECK((x->first_own_commit == NULL) == (y->first_own_commit == NULL),
+              "determinismo: primo commit proprio di '%s'", x->name);
+        if (x->first_own_commit && y->first_own_commit)
+            CHECK(strcmp(x->first_own_commit, y->first_own_commit) == 0,
+                  "determinismo: primo commit proprio di '%s'", x->name);
+        CHECK(x->alias_count == y->alias_count,
+              "determinismo: alias di '%s'", x->name);
+        for (size_t k = 0; k < x->alias_count && k < y->alias_count; k++)
+            CHECK(strcmp(x->alias_members[k], y->alias_members[k]) == 0,
+                  "determinismo: alias di '%s'", x->name);
     }
 }
 
@@ -133,11 +144,11 @@ static void compare_histories(const History *a, const History *b)
 
 static int test_gitdata(const GitData *d)
 {
-    /* il repo di prova: 18 commit, 15 riferimenti (11 branch incl.
-     * origin/main, 4 tag) */
-    CHECK(d->commit_count == 18, "commit_count = %zu, atteso 18",
+    /* il repo di prova: 22 commit, 18 riferimenti (13 branch incl.
+     * origin/main, 5 tag) */
+    CHECK(d->commit_count == 22, "commit_count = %zu, atteso 22",
           d->commit_count);
-    CHECK(d->ref_count == 15, "ref_count = %zu, atteso 15", d->ref_count);
+    CHECK(d->ref_count == 18, "ref_count = %zu, atteso 18", d->ref_count);
     REQUIRE(d->head_branch != NULL, "HEAD scollegata nel repo di test");
     CHECK(strcmp(d->head_branch, "main") == 0, "head_branch = %s",
           d->head_branch);
@@ -264,8 +275,8 @@ static int test_history_default(const GitData *data)
     REQUIRE(history_build(&hist, data, &cfg, err, sizeof err),
             "history_build fallita");
 
-    /* nodi: 9 branch locali + origin/main */
-    CHECK(hist.branch_count == 10, "branch_count = %zu, atteso 10",
+    /* nodi: 12 branch locali + origin/main */
+    CHECK(hist.branch_count == 13, "branch_count = %zu, atteso 13",
           hist.branch_count);
 
     /* ogni branch ha una motivazione non vuota */
@@ -294,21 +305,29 @@ static int test_history_default(const GitData *data)
     CHECK(om->is_long_lived, "origin/main: long-lived come main");
 
     const char *b2h = hash_of(data, "B2:");
-    const char *b3h = hash_of(data, "B3:");
+    const char *b1h = hash_of(data, "B1:");
+    const char *bh = hash_of(data, "B:");
     const char *c1h = hash_of(data, "C1:");
     const char *ch = hash_of(data, "terza revisione");
 
-    /* branch1: mergiato in main; padre dedotto, nessun commit esclusivo */
+    /* main long-lived: nessun padre, nessun fork, nessun candidato */
+    CHECK(main_b->fork_hash == NULL, "main: fork mostrato su un long-lived");
+    CHECK(main_b->candidate_count == 0, "main: candidati non attesi");
+
+    /* branch1: partito da B, poi mergiato in main; i suoi commit sono
+     * raggiungibili da main ma non li attraversa: fork su B, non su B3 */
     const BranchNode *b1 = branch_named(&hist, "branch1");
     REQUIRE(b1 != NULL, "branch1 assente");
     CHECK(b1->state == PARENT_DEDUCED && b1->parent &&
               strcmp(b1->parent, "main") == 0,
           "branch1: padre %s (stato %d)", b1->parent ? b1->parent : "-",
           (int)b1->state);
-    CHECK(b1->first_exclusive_hash == NULL,
-          "branch1: atteso nessun commit esclusivo");
-    CHECK(b1->fork_hash && b3h && strcmp(b1->fork_hash, b3h) == 0,
-          "branch1: fork atteso su B3");
+    CHECK(b1->fork_hash && bh && strcmp(b1->fork_hash, bh) == 0,
+          "branch1: fork atteso su B");
+    CHECK(b1->first_own_commit && b1h &&
+              strcmp(b1->first_own_commit, b1h) == 0,
+          "branch1: primo commit proprio atteso B1");
+    CHECK(!candidates_contain(b1, "ff"), "branch1: ff non deve essere candidato");
 
     /* branch2: diramato da B2 lungo branch1 */
     const BranchNode *b2 = branch_named(&hist, "branch2");
@@ -318,9 +337,9 @@ static int test_history_default(const GitData *data)
           "branch2: padre %s", b2->parent ? b2->parent : "-");
     CHECK(b2->fork_hash && b2h && strcmp(b2->fork_hash, b2h) == 0,
           "branch2: fork atteso su B2");
-    CHECK(b2->first_exclusive_hash && c1h &&
-              strcmp(b2->first_exclusive_hash, c1h) == 0,
-          "branch2: primo commit esclusivo atteso C1");
+    CHECK(b2->first_own_commit && c1h &&
+              strcmp(b2->first_own_commit, c1h) == 0,
+          "branch2: primo commit proprio atteso C1");
 
     /* feature/x: da C su main */
     const BranchNode *fx = branch_named(&hist, "feature/x");
@@ -338,7 +357,8 @@ static int test_history_default(const GitData *data)
               strcmp(ffb->parent, "main") == 0,
           "ff: padre %s", ffb->parent ? ffb->parent : "-");
 
-    /* caso ambiguo: ambchild non sceglie tra amb1/amb2/ammbase */
+    /* caso ambiguo: amb1/amb2/ambbase sono un unico gruppo di alias sulla
+     * stessa punta: stesso padre dedotto, ordine interno non determinabile */
     const BranchNode *ac = branch_named(&hist, "ambchild");
     REQUIRE(ac != NULL, "ambchild assente");
     CHECK(ac->state == PARENT_AMBIGUOUS, "ambchild: stato %d", (int)ac->state);
@@ -350,12 +370,50 @@ static int test_history_default(const GitData *data)
           "ambchild: candidati inattesi");
 
     const char *amb[] = {"amb1", "amb2", "ambbase"};
+    const char *ah = hash_of(data, "A:");
+    const char *xh = hash_of(data, "X:");
     for (int i = 0; i < 3; i++) {
         const BranchNode *b = branch_named(&hist, amb[i]);
         REQUIRE(b != NULL, "branch ambiguo assente");
-        CHECK(b->state == PARENT_AMBIGUOUS && b->parent == NULL,
-              "%s: atteso ambiguo senza padre", amb[i]);
+        CHECK(b->state == PARENT_DEDUCED && b->parent &&
+                  strcmp(b->parent, "main") == 0,
+              "%s: atteso padre dedotto 'main', trovato %s (stato %d)", amb[i],
+              b->parent ? b->parent : "-", (int)b->state);
+        CHECK(b->fork_hash && ah && strcmp(b->fork_hash, ah) == 0,
+              "%s: fork atteso su A", amb[i]);
+        CHECK(b->first_own_commit && xh && strcmp(b->first_own_commit, xh) == 0,
+              "%s: primo commit proprio atteso X", amb[i]);
+        CHECK(b->alias_count == 2, "%s: attesi 2 alias, trovati %zu", amb[i],
+              b->alias_count);
+        CHECK(b->motivation && strstr(b->motivation, "gruppo di alias"),
+              "%s: la motivazione deve dichiarare il gruppo di alias", amb[i]);
     }
+
+    /* spareggio sulla data: tre branch nati dallo stesso punto R; solo la
+     * struttura non distingue, quindi la data e' dichiarata come tale */
+    const BranchNode *oc = branch_named(&hist, "oC");
+    REQUIRE(oc != NULL, "oC assente");
+    CHECK(oc->state == PARENT_DEDUCED && oc->parent &&
+              strcmp(oc->parent, "oA") == 0,
+          "oC: padre atteso 'oA', trovato %s", oc->parent ? oc->parent : "-");
+    CHECK(oc->motivation && strstr(oc->motivation, "data"),
+          "oC: la motivazione deve dichiarare lo scarto per data");
+    CHECK(oc->motivation && strstr(oc->motivation, "rebase"),
+          "oC: la motivazione deve avvertire sull'affidabilita' delle date");
+
+    const BranchNode *ob = branch_named(&hist, "oB");
+    REQUIRE(ob != NULL, "oB assente");
+    CHECK(ob->state == PARENT_AMBIGUOUS && ob->parent == NULL,
+          "oB: atteso ambiguo senza padre");
+    CHECK(ob->candidate_count == 2 && candidates_contain(ob, "oA") &&
+              candidates_contain(ob, "oC"),
+          "oB: candidati attesi oA, oC");
+
+    const BranchNode *oa = branch_named(&hist, "oA");
+    REQUIRE(oa != NULL, "oA assente");
+    CHECK(oa->state == PARENT_NONE && oa->parent == NULL,
+          "oA: nessun branch piu' antico, quindi nessun padre");
+    CHECK(oa->fork_hash == NULL, "oA: nessun punto di diramazione");
 
     /* determinismo: una seconda costruzione da' lo stesso modello */
     History hist2;
@@ -385,7 +443,7 @@ static int test_overrides(const GitData *data)
             "history_build con override fallita");
     const BranchNode *b2 = branch_named(&hist, "branch2");
     REQUIRE(b2 != NULL, "branch2 assente");
-    CHECK(b2->state == PARENT_CERTAIN && b2->parent &&
+    CHECK(b2->state == PARENT_CONFIGURED && b2->parent &&
               strcmp(b2->parent, "ff") == 0,
           "override: branch2 padre %s (stato %d)",
           b2->parent ? b2->parent : "-", (int)b2->state);
@@ -417,7 +475,7 @@ static int test_overrides(const GitData *data)
     REQUIRE(b2 && ffb, "branch assenti nel ciclo");
     CHECK(b2->state == PARENT_AMBIGUOUS && b2->parent == NULL,
           "ciclo: branch2 doveva diventare ambiguo (minore del ciclo)");
-    CHECK(ffb->state == PARENT_CERTAIN && ffb->parent &&
+    CHECK(ffb->state == PARENT_CONFIGURED && ffb->parent &&
               strcmp(ffb->parent, "branch2") == 0,
           "ciclo: ff mantiene l'override");
     history_free(&hist);
@@ -443,6 +501,8 @@ static int test_long_lived_custom(const GitData *data)
     CHECK(b1->is_long_lived, "branch1: non marcato long-lived");
     CHECK(b1->state == PARENT_NONE && b1->parent == NULL,
           "branch1 long-lived: padre non dedotto");
+    CHECK(b1->fork_hash == NULL && b1->candidate_count == 0,
+          "branch1 long-lived: nessun fork ne' candidati");
 
     const BranchNode *main_b = branch_named(&hist, "main");
     REQUIRE(main_b != NULL, "main assente");
