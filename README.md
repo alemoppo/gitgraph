@@ -296,4 +296,9 @@ Il nome della directory e il marcatore, da soli, **non** autorizzano mai una
 cancellazione: sono due delle condizioni, non un suffisso sufficiente. Tutte le
 verifiche sono coperte dal test `scripts_guard`, che lavora solo dentro
 `build/guard_sandbox` e verifica, per ogni caso negativo, sia il rifiuto sia
-l'integrità dei file sentinella.
+
+I percorsi possono contenere spazi e caratteri che cmd.exe tratta in modo
+speciale (`&` e' un separatore di comandi): lo script non assembla mai
+frammenti di riga di comando dentro variabili e passa ogni percorso ai
+programmi esterni come argomento quotato sul posto, quindi una build situata,
+per esempio, in `C:\dev\repo & build` continua a funzionare.l'integrità dei file sentinella.

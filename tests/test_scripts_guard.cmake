@@ -32,12 +32,16 @@ set(root "${GG_GUARD_DIR}/test_repos")
 file(MAKE_DIRECTORY "${root}")
 file(TO_NATIVE_PATH "${root}" root_native)
 
-# gg_run_script(<0|1> ARGS <argomenti...> [ROOT <radice>] [NO_ROOT]
+# gg_run_script(<0|1> ARGS <argomenti...> [ROOT <radice>] [REPO <percorso>]
+#                              [NO_ROOT]
 #                              [GUARD_FILE <file>]
 #                              [GUARD_TEXT <testo>] [EXPECT_TEXT <testo>]
 #                              [WARN_TEXT <testo>] [CHECK_FILE <file>])
 # 0 = lo script deve riuscire, 1 = lo script deve rifiutare.
 #   ROOT         radice passata in GG_TEST_ROOT (predefinito: la sandbox)
+#   REPO         destinazione passata in GG_TEST_REPO; con ARGS si puo' invece
+#                passarla come argomento dello script (entrambe le vie sono
+#                supportate e testate)
 #   NO_ROOT      GG_TEST_ROOT viene passata vuota, come se non fosse impostata
 #   EXPECT_TEXT  con 1: deve comparire fra i messaggi (un rifiuto per il motivo
 #                sbagliato non passa)
@@ -45,7 +49,7 @@ file(TO_NATIVE_PATH "${root}" root_native)
 #   GUARD_FILE   con 1: file sentinella che deve esistere e restare identico
 #   CHECK_FILE   con 0: file che deve esistere dopo l'operazione
 function(gg_run_script expect_ok)
-    cmake_parse_arguments(R "NO_ROOT" "ROOT;GUARD_FILE;GUARD_TEXT;EXPECT_TEXT;WARN_TEXT;CHECK_FILE" "ARGS" ${ARGN})
+    cmake_parse_arguments(R "NO_ROOT" "ROOT;REPO;GUARD_FILE;GUARD_TEXT;EXPECT_TEXT;WARN_TEXT;CHECK_FILE" "ARGS" ${ARGN})
     set(root_env "${root_native}")
     if(R_NO_ROOT)
         set(root_env "")
@@ -53,6 +57,9 @@ function(gg_run_script expect_ok)
         set(root_env "${R_ROOT}")
     endif()
     set(R_ENV_REPO "")
+    if(DEFINED R_REPO)
+        set(R_ENV_REPO "${R_REPO}")
+    endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env "GG_TEST_REPO=${R_ENV_REPO}"
                 "GG_TEST_ROOT=${root_env}"
@@ -113,13 +120,17 @@ endfunction()
 
 # Crea una giunzione. Se il collegamento non e' disponibile non viene creato
 # nulla e il chiamante lo verifica con EXISTS, dichiarando il caso saltato.
-# mklink va chiamato con percorsi nativi: con le barre in avanti interpreta
-# "/Users" come un'opzione.
+# La creazione passa da PowerShell e non da mklink: quest'ultimo gira dentro
+# cmd.exe, che spezzerebbe la riga di comando se il nome contiene "&".
 function(gg_make_junction link target)
     file(TO_NATIVE_PATH "${link}" link_native)
     file(TO_NATIVE_PATH "${target}" target_native)
-    execute_process(COMMAND cmd /c mklink /J "${link_native}" "${target_native}"
-                    RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env "GG_LINK=${link_native}"
+                "GG_TARGET=${target_native}"
+                powershell -NoProfile -ExecutionPolicy Bypass -Command
+                "New-Item -ItemType Junction -Path $env:GG_LINK -Target $env:GG_TARGET | Out-Null"
+        RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
     if(NOT rc EQUAL 0)
         file(REMOVE "${link_native}")
     endif()
@@ -306,6 +317,75 @@ foreach(size_tex 24 25 26)
     endif()
 endforeach()
 
+# --- 6g. radice con spazi nel nome: gestita correttamente -----------------
+# Il percorso passa dalla variabile d'ambiente GG_TEST_ROOT e la destinazione
+# come argomento dello script: sono i due canali usati dal progetto.
+set(root_spazi "${GG_GUARD_DIR}/radice con spazi")
+file(MAKE_DIRECTORY "${root_spazi}")
+gg_run_script(0 ROOT "${root_spazi}" ARGS "${root_spazi}/gitgraph_test_repo"
+             CHECK_FILE "${root_spazi}/gitgraph_test_repo/.git")
+# rigenerazione sulla stessa directory, questa volta via GG_TEST_REPO
+gg_run_script(0 ROOT "${root_spazi}" REPO "${root_spazi}/gitgraph_test_repo"
+             CHECK_FILE "${root_spazi}/gitgraph_test_repo/.git")
+# dentro questa radice i pericolosi continuano a essere rifiutati
+set(outside_spazi "${GG_GUARD_DIR}/fuori radice/gitgraph_test_repo")
+gg_make_prepared("${outside_spazi}")
+gg_run_script(1 ROOT "${root_spazi}" ARGS "${outside_spazi}"
+             GUARD_FILE "${outside_spazi}/conservami.txt" GUARD_TEXT "dati importanti"
+             EXPECT_TEXT "non e' dentro la radice autorizzata")
+set(marker_spazi "${root_spazi}/gitgraph_test_repo_marker")
+gg_write_marker("${marker_spazi}" "crlf_lf" 27)
+file(WRITE "${marker_spazi}/conservami.txt" "dati importanti")
+gg_run_script(1 ROOT "${root_spazi}" ARGS "${marker_spazi}"
+             GUARD_FILE "${marker_spazi}/conservami.txt" GUARD_TEXT "dati importanti"
+             EXPECT_TEXT "non e' una directory di test di gitgraph")
+
+# --- 6h. radice con "&" nel nome: gestita correttamente --------------------
+# "&" e' un separatore di comandi per cmd.exe e viene reinterpretato anche
+# quando arriva da una variabile: per questo il percorso arriva dalla variabile
+# d'ambiente, che non viene reinterpretata (verificato: con una variabile
+# costruita a mano il comando viene spezzato).
+set(root_amp "${GG_GUARD_DIR}/radice&speciale")
+file(MAKE_DIRECTORY "${root_amp}")
+gg_run_script(0 ROOT "${root_amp}" REPO "${root_amp}/gitgraph_test_repo"
+             CHECK_FILE "${root_amp}/gitgraph_test_repo/.git")
+gg_run_script(0 ROOT "${root_amp}" REPO "${root_amp}/gitgraph_test_repo_scenario"
+             CHECK_FILE "${root_amp}/gitgraph_test_repo_scenario/.git")
+# pericoloso con questa radice: destinazione esterna, sentinella intatta
+set(outside_amp "${GG_GUARD_DIR}/fuori&radice/gitgraph_test_repo")
+gg_make_prepared("${outside_amp}")
+gg_run_script(1 ROOT "${root_amp}" REPO "${outside_amp}"
+             GUARD_FILE "${outside_amp}/conservami.txt" GUARD_TEXT "dati importanti"
+             EXPECT_TEXT "non e' dentro la radice autorizzata")
+
+# --- 6i. controllo dei collegamenti nelle due varianti, con nomi difficili --
+# variante senza -IncludeAncestors: la destinazione e' una giunzione
+gg_make_junction("${root_spazi}/gitgraph_test_repo_junction" "${outside_spazi}")
+if(EXISTS "${root_spazi}/gitgraph_test_repo_junction")
+    gg_run_script(1 ROOT "${root_spazi}" ARGS "${root_spazi}/gitgraph_test_repo_junction"
+                 EXPECT_TEXT "collegamento")
+    if(NOT EXISTS "${outside_spazi}/conservami.txt")
+        message(FATAL_ERROR "il contenuto della giunzione e' stato toccato")
+    endif()
+else()
+    message("scripts_guard: mklink non disponibile, giunzione DESTINAZIONE SALTATO")
+endif()
+# variante con -IncludeAncestors: la radice stessa e' una giunzione, e il suo
+# nome contiene sia "&" sia spazi
+set(root_amp_target "${GG_GUARD_DIR}/radice&speciale fisica")
+gg_make_prepared("${root_amp_target}/gitgraph_test_repo")
+gg_make_junction("${GG_GUARD_DIR}/radice&speciale_giunzione" "${root_amp_target}")
+if(EXISTS "${GG_GUARD_DIR}/radice&speciale_giunzione")
+    gg_run_script(1 ROOT "${GG_GUARD_DIR}/radice&speciale_giunzione"
+                 REPO "${GG_GUARD_DIR}/radice&speciale_giunzione/gitgraph_test_repo"
+                 EXPECT_TEXT "radice autorizzata")
+    if(NOT EXISTS "${root_amp_target}/gitgraph_test_repo/conservami.txt")
+        message(FATAL_ERROR
+                "la destinazione fisica sotto la radice-giunzione e' stata toccata")
+    endif()
+else()
+    message("scripts_guard: mklink non disponibile, giunzione RADICE SALTATO")
+endif()
 # --- 7. radice non impostata: rifiutato --------------------------------------
 gg_run_script(1 NO_ROOT ARGS "${root}/gitgraph_test_repo"
              EXPECT_TEXT "GG_TEST_ROOT")

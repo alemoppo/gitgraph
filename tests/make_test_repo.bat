@@ -333,7 +333,7 @@ git -C "%REPO%" update-ref refs/remotes/origin/branch1 branch1 || goto :err
 rem --- alias: nome diverso, stessa punta di feature/x ------------------------
 git -C "%REPO%" update-ref refs/remotes/origin/feature-x feature/x || goto :err
 
-echo OK: %REPO%
+echo OK: "%REPO%"
 exit /b 0
 
 rem --- helper: il nome finale e' ammesso -------------------------------------
@@ -368,9 +368,17 @@ rem prima riga (accettando contenuti aggiuntivi) e "dir /a:l" non coprirebbe i
 rem componenti del percorso. Qualsiasi codice di uscita diverso da zero fa
 rem fallire: in caso di dubbio non si cancella.
 :check_no_reparse
-set "NOARGS=-Path %1"
-if "%~3"=="antenati" set "NOARGS=-Path %1 -IncludeAncestors"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_no_reparse.ps1" %NOARGS%
+rem Il percorso viene passato come argomento quotato sul posto: "%~1" toglie le
+rem virgolette che la call ha messo attorno a %1, poi se ne aggiungono di nuove.
+rem NON si assembla in una variabile un frammento di riga di comando, perche'
+rem cmd.exe ri-interpreta i metacaratteri come & provenienti dall'espansione: un
+rem percorso con & (o con spazi) verrebbe spezzato e il controllo fallirebbe.
+if "%~3"=="antenati" goto :cnr_antenati
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_no_reparse.ps1" -Path "%~1"
+goto :cnr_esito
+:cnr_antenati
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0check_no_reparse.ps1" -Path "%~1" -IncludeAncestors
+:cnr_esito
 if errorlevel 2 goto :chk_link
 if errorlevel 1 goto :chk_unknown
 exit /b 0
