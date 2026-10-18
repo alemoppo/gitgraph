@@ -676,8 +676,6 @@ static void mark_chain(Ctx *ctx, size_t b)
  *  - f(X) == c e b ha integrato X con un merge (la punta di X e' raggiungibile
  *    da b ma non sta sulla catena dei primi genitori di b): X e' il contenuto
  *    di un merge gia' assunto da b, quindi non puo' essere un padre plausibile;
- *    (se invece la punta di X sta sulla catena di b, e' un padre regolare e
- *    non e' la via del merge);
  *  - f(X) == c e nessuno dei due casi: i due rami sono fratelli nati dallo
  *    stesso punto. La storia non registra chi sia nato prima, e l'ordine di
  *    nascita (date e posizioni nel log) e' inaffidabile con un rebase: non
@@ -702,7 +700,7 @@ static bool is_child_at(const Ctx *ctx, size_t b, size_t c, size_t x, uint32_t m
             return false; /* X ha integrato b con un merge: X e' il padre */
         if (ctx->mark_gen[xf->tip_idx] != mark &&
             bitset_test(bf->reach, xf->tip_idx))
-            return true; /* b ha integrato X con un merge: X e' merge assunto */
+            return true;
         return false; /* fratelli nati dallo stesso punto: entrambi in lizza */
     }
     return false;
@@ -1118,8 +1116,8 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
              *     vale anche se nato dallo stesso punto, perche' il merge e'
              *     un fatto;
              *  3. fratelli nati dallo stesso punto: sempre ambigui, anche se
-             *     il candidato e' uno solo (regola 1, dichiarata e testata
-             *     sui casi mk3). Un tronco in coda ai candidati (l'antenato
+             *     il candidato e' uno solo (regola dei fratelli, dichiarata e
+             *     testata sui casi mk3). Un tronco in coda ai candidati (l'antenato
              *     non fratello del ramo piu' antico del gruppo) non decide:
              *     il ramo potrebbe essere figlio di un fratello;
              *  4. se resta un solo candidato e NON e' nato dallo stesso punto

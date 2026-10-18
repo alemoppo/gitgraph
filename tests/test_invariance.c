@@ -19,6 +19,7 @@
 #include "config.h"
 #include "gitdata.h"
 #include "history.h"
+#include "layout.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -166,6 +167,82 @@ static char *describe(const History *h, const GitData *d)
     return out.data;
 }
 
+/* Descrizione canonica della disposizione, per famiglia (per punta): corsia,
+ * riga e archi uscenti. Come describe(), i nomi non compaiono: due permutazioni
+ * con nomi diversi si confrontano riga per riga. */
+static char *describe_layout(const History *h, const GitData *d, const Layout *l)
+{
+    size_t n = h->branch_count;
+    char **lines = (char **)calloc(n ? n : 1, sizeof(char *));
+    size_t count = 0;
+    char a[32], b[32];
+
+    for (size_t i = 0; i < n; i++) {
+        size_t tip =
+            gitdata_find_commit(d, d->refs[h->branches[i].ref_index].target);
+        if (tip == NO_TIP)
+            continue;
+        bool gia = false;
+        for (size_t k = 0; k < i && !gia; k++) {
+            size_t t2 =
+                gitdata_find_commit(d, d->refs[h->branches[k].ref_index].target);
+            if (t2 == tip)
+                gia = true;
+        }
+        if (gia)
+            continue;
+
+        StrBuf sb;
+        sb_init(&sb);
+        sb_appendf(&sb, "%s corsia=%zu riga=%zu archi=[",
+                   tip_tag(d, tip, a, sizeof a), l->nodes[i].lane,
+                   l->nodes[i].row);
+        char **tags = (char **)calloc(l->edge_count + 1, sizeof(char *));
+        size_t nt = 0;
+        for (size_t e = 0; e < l->edge_count; e++) {
+            if (l->edges[e].child >= n)
+                continue;
+            size_t ctip = gitdata_find_commit(
+                d, d->refs[h->branches[l->edges[e].child].ref_index].target);
+            if (ctip != tip)
+                continue;
+            size_t ptip = gitdata_find_commit(
+                d, d->refs[h->branches[l->edges[e].parent].ref_index].target);
+            tags[nt] = xmalloc(64);
+            snprintf(tags[nt], 64, "%s:%s", tip_tag(d, ptip, b, sizeof b),
+                     l->edges[e].kind == LAYOUT_EDGE_SUGGESTED ? "suggerito"
+                                                               : "continuo");
+            nt++;
+        }
+        qsort(tags, nt, sizeof(char *), cmp_line);
+        bool first = true;
+        for (size_t k = 0; k < nt; k++) {
+            if (k && strcmp(tags[k], tags[k - 1]) == 0)
+                continue; /* archi identici (alias sulla stessa punta) */
+            if (!first)
+                sb_append(&sb, ",");
+            first = false;
+            sb_append(&sb, tags[k]);
+        }
+        for (size_t k = 0; k < nt; k++)
+            free(tags[k]);
+        free(tags);
+        sb_append(&sb, "]");
+        lines[count++] = sb.data ? sb.data : xstrdup("");
+    }
+    qsort(lines, count, sizeof(char *), cmp_line);
+
+    StrBuf out;
+    sb_init(&out);
+    for (size_t i = 0; i < count; i++) {
+        sb_append(&out, lines[i]);
+        sb_append(&out, "\n");
+        free(lines[i]);
+    }
+    free(lines);
+    return out.data;
+}
+
 /* ---------- permutazioni dei nomi ---------- */
 
 /* Copia di GitData con i nomi del gruppo permutati: stessi commit, stesse
@@ -291,6 +368,7 @@ static void check_group(const GitData *base, const char **names, size_t n,
     size_t perm[24][4];
     size_t count = permutations(n, perm, 24);
     char *riferimento = NULL;
+    char *rif_layout = NULL;
 
     for (size_t k = 0; k < count; k++) {
         GitData permuted;
@@ -323,8 +401,15 @@ static void check_group(const GitData *base, const char **names, size_t n,
         /* e ogni ramo con un tronco fra gli antenati deve avere un padre o
          * un padre suggerito che arriva al tronco */
         gg_check_trunk_ancestry(&hist, &permuted, etichetta);
+        /* la disposizione (fase 3) non deve dipendere dai nomi */
+        Layout lay;
+        layout_build(&lay, &hist);
+        gg_check_layout(&lay, &hist, etichetta);
+        char *dl = describe_layout(&hist, &permuted, &lay);
+        layout_free(&lay);
         if (k == 0) {
             riferimento = desc;
+            rif_layout = dl;
             printf("%s: %zu permutazioni, modello di riferimento:\n%s", etichetta,
                    count, riferimento);
         } else {
@@ -333,6 +418,11 @@ static void check_group(const GitData *base, const char **names, size_t n,
                   "--- trovato ---\n%s",
                   etichetta, k, riferimento, desc);
             free(desc);
+            CHECK(strcmp(dl, rif_layout) == 0,
+                  "%s: la permutazione %zu cambia la disposizione\n"
+                  "--- atteso ---\n%s--- trovato ---\n%s",
+                  etichetta, k, rif_layout, dl);
+            free(dl);
         }
         (*permutazioni_totali)++;
         history_free(&hist);
@@ -341,6 +431,7 @@ static void check_group(const GitData *base, const char **names, size_t n,
         config_free(&cfg);
     }
     free(riferimento);
+    free(rif_layout);
 }
 
 /* ---------- repository di prova costruiti al volato ---------- */
@@ -715,6 +806,12 @@ static void check_mk3(const GitData *data, const char *p_name,
     }
     check_suggestions_acyclic(&hist, etichetta);
     gg_check_trunk_ancestry(&hist, data, etichetta);
+    {
+        Layout lay;
+        layout_build(&lay, &hist);
+        gg_check_layout(&lay, &hist, etichetta);
+        layout_free(&lay);
+    }
     printf("%s: verificati '%s' e '%s' (fratelli, ambigui)\n", etichetta,
            nome_nato_prima, nome_nato_dopo);
     history_free(&hist);

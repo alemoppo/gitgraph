@@ -15,7 +15,6 @@
  *                 (suggested_parent + suggestion_basis), che il layout puo'
  *                 mostrare tratteggiato; [parents] in graph.cfg dichiara il
  *                 padre vero e rende il caso CONFIGURATO.
- *                 branch sulla stessa punta): non si inventa un padre.
  *  - NESSUNO:     nessun branch padre individuabile.
  */
 #ifndef GG_HISTORY_H

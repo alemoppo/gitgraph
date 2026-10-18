@@ -14,6 +14,7 @@
 #include "config.h"
 #include "gitdata.h"
 #include "history.h"
+#include "layout.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -339,10 +340,10 @@ static int test_history_default(const GitData *data)
     /* branch1: partito da B, poi mergiato in main. branch2 nasce da B2 che sta
      * sulla sua catena: su B2 arrivano due figli (B3 di branch1 e C1 di
      * branch2) e la struttura non dice chi e' nato prima: con l'ordine di
-     * nascita non disponibile, i due sono fratelli per natura (regola 1) e il
-     * punto di diramazione di branch1 si ferma a B2, dove resta in lizza solo
-     * branch2 (sp e' nato piu' in alto, su B3, e sotto il punto resta un
-     * figlio escluso). branch1 e' pero' il piu' antico della diramazione
+     * nascita non disponibile, i due sono fratelli per natura (regola dei
+     * fratelli) e il punto di diramazione di branch1 si ferma a B2, dove
+     * resta in lizza solo branch2 (sp e' nato piu' in alto, su B3, e sotto il
+     * punto resta un figlio escluso). branch1 e' pero' il piu' antico della
      * (B3 precede C1): la discesa sotto il punto continua fino al tronco
      * main, il primo antenato non fratello, che si aggiunge ai candidati e
      * diventa il padre suggerito. Lo stato resta ambiguo (un fratello
@@ -470,9 +471,10 @@ static int test_history_default(const GitData *data)
     }
 
     /* oB e oC nascono come oA dallo stesso punto R: i tre sono fratelli per
-     * natura (regola 1) e nessuno contiene l'altro, quindi nessun padre e'
-     * dedotto. Per oB e per oC resta in lizza oA, che ha il primo commit
-     * proprio piu' vecchio (OA precede OC e OB): il suggerito e' oA, per data. */
+     * natura (regola dei fratelli) e nessuno contiene l'altro, quindi nessun
+     * padre e' dedotto. Per oB e per oC resta in lizza oA, che ha il primo
+     * commit proprio piu' vecchio (OA precede OC e OB): il suggerito e' oA,
+     * per data. */
     const BranchNode *oc = branch_named(&hist, "oC");
     REQUIRE(oc != NULL, "oC assente");
     /* oC e' nato da R come oA e come oB: due fratelli pari, due candidati
@@ -543,6 +545,14 @@ static int test_history_default(const GitData *data)
      * (main e' il tronco implicito) ha un padre o un padre suggerito, e la
      * catena dei suggeriti arriva a genealogia risolta senza cicli */
     gg_check_trunk_ancestry(&hist, data, "fixture principale");
+
+    /* proprieta' della disposizione (fase 3) */
+    {
+        Layout lay;
+        layout_build(&lay, &hist);
+        gg_check_layout(&lay, &hist, "fixture principale");
+        layout_free(&lay);
+    }
 
     /* --- riferimenti locali e remote-tracking con punte diverse -------------- */
     /* origin/branch1 punta allo stesso commit di branch1: specchio provato */

@@ -32,6 +32,7 @@ add_library(gg_core STATIC
     src/config.c
     src/gitdata.c
     src/history.c
+    src/layout.c
 )
 target_include_directories(gg_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
@@ -57,6 +58,11 @@ target_link_libraries(test_scale PRIVATE gg_core)
 
 add_executable(test_config tests/test_config.c)
 target_link_libraries(test_config PRIVATE gg_core)
+
+# Disposizione del grafo dei branch (fase 3): nodi per branch, righe per
+# punta, corsie per famiglia, archi padre/suggerito. Headless, senza SDL.
+add_executable(test_layout tests/test_layout.c)
+target_link_libraries(test_layout PRIVATE gg_core)
 
 # Generatore di repository sintetici: scrive su stdout uno stream per
 # "git fast-import" (nessuna dipendenza dal core, serve solo la libc).
@@ -96,6 +102,10 @@ set_tests_properties(core PROPERTIES FIXTURES_REQUIRED testrepo)
 # (il test scrive e rimuove graph.cfg dentro quel repository).
 add_test(NAME config COMMAND test_config "${CMAKE_CURRENT_BINARY_DIR}" "${GG_TEST_REPO}")
 set_tests_properties(config PROPERTIES FIXTURES_REQUIRED testrepo)
+
+# Disposizione del grafo dei branch (fase 3).
+add_test(NAME layout COMMAND test_layout "${GG_TEST_REPO}")
+set_tests_properties(layout PROPERTIES FIXTURES_REQUIRED testrepo)
 
 # Invarianza per rinomina: la genealogia non deve dipendere dall'ordine
 # alfabetico dei nomi. Il test rinomina i riferimenti in memoria (stessi commit,

@@ -23,6 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "layout.h"
+
 /* genitore sulla catena dei primi genitori, SIZE_MAX se non c'e' */
 static size_t gg_primo_genitore(const GitData *d, size_t cur)
 {
@@ -104,6 +106,114 @@ static void gg_check_trunk_ancestry(const History *h, const GitData *d,
         }
     }
     free(tronco);
+}
+
+/* PROPRIETA' DELLA DISPOSIZIONE (fase 3): il layout e' coerente col modello.
+ *  - un nodo per branch, nella stessa riga della punta (o primo commit
+ *    proprio se la punta e' fuori dal log);
+ *  - corsia dentro [0, lanes); i riferimenti sulla stessa punta (stessa
+ *    famiglia) condividono riga e corsia;
+ *  - ogni branch ha al piu' un arco uscente: continuo verso il padre se il
+ *    padre e' un altro ramo, tratteggiato verso il suggerito se il caso e'
+ *    ambiguo, nessuno altrimenti (gli specchi sono lo stesso ramo);
+ *  - il grafo degli archi non ha cicli. */
+static void gg_check_layout(const Layout *l, const History *h, const char *etichetta)
+{
+    size_t bc = h->branch_count;
+    CHECK(l->node_count == bc, "%s: layout con %zu nodi per %zu branch",
+          etichetta, l->node_count, bc);
+    if (!h->data)
+        return;
+    CHECK(l->rows == h->data->commit_count, "%s: layout.rows = %zu, commit = %zu",
+          etichetta, l->rows, h->data->commit_count);
+
+    for (size_t i = 0; i < l->node_count; i++) {
+        const LayoutNode *nd = &l->nodes[i];
+        const BranchNode *b = &h->branches[i];
+        size_t row = b->tip_pos != (size_t)-1
+                         ? b->tip_pos
+                         : (b->first_own_pos != (size_t)-1 ? b->first_own_pos
+                                                           : (size_t)-1);
+        CHECK(nd->branch == i, "%s: nodo %zu riferisce branch %zu", etichetta, i,
+              nd->branch);
+        CHECK(nd->row == row, "%s: '%s' riga %zu, attesa %zu", etichetta, b->name,
+              nd->row, row);
+        CHECK(l->lanes == 0 || nd->lane < l->lanes,
+              "%s: '%s' corsia %zu fuori da %zu", etichetta, b->name, nd->lane,
+              l->lanes);
+        /* stessa punta = stessa famiglia = stessa posizione */
+        for (size_t k = 0; k < i; k++) {
+            if (b->tip_pos != (size_t)-1 && h->branches[k].tip_pos == b->tip_pos)
+                CHECK(l->nodes[k].lane == nd->lane &&
+                          l->nodes[k].row == nd->row,
+                      "%s: '%s' e '%s' (stessa punta) in posizioni diverse",
+                      etichetta, b->name, h->branches[k].name);
+        }
+    }
+
+    size_t *par = (size_t *)malloc((bc ? bc : 1) * sizeof(size_t));
+    if (!par) {
+        CHECK(false, "%s: memoria esaurita nella proprieta' del layout",
+              etichetta);
+        return;
+    }
+    for (size_t i = 0; i < bc; i++)
+        par[i] = (size_t)-1;
+
+    for (size_t i = 0; i < bc; i++) {
+        const BranchNode *b = &h->branches[i];
+        const char *want = NULL;
+        LayoutEdgeKind want_kind = LAYOUT_EDGE_PARENT;
+        if (b->parent) {
+            want = b->parent;
+        } else if (b->state == PARENT_AMBIGUOUS && b->suggested_parent) {
+            want = b->suggested_parent;
+            want_kind = LAYOUT_EDGE_SUGGESTED;
+        }
+        size_t out = 0;
+        bool ok = false;
+        for (size_t e = 0; e < l->edge_count; e++) {
+            if (l->edges[e].child != i)
+                continue;
+            out++;
+            par[i] = l->edges[e].parent;
+            size_t j = want ? history_find_branch(h, want) : (size_t)-1;
+            if (j != (size_t)-1 && j != i && l->edges[e].parent == j &&
+                l->edges[e].kind == want_kind)
+                ok = true;
+        }
+        CHECK(out <= 1, "%s: '%s' ha %zu archi uscenti", etichetta, b->name, out);
+        if (!want) {
+            CHECK(out == 0, "%s: '%s' senza padre ma con un arco", etichetta,
+                  b->name);
+            continue;
+        }
+        size_t j = history_find_branch(h, want);
+        bool stesso_ramo = (j != (size_t)-1 && j != i &&
+                            b->tip_pos != (size_t)-1 &&
+                            h->branches[j].tip_pos == b->tip_pos);
+        if (j == (size_t)-1 || j == i || stesso_ramo)
+            CHECK(out == 0, "%s: '%s' arco verso un padre che e' lo stesso ramo",
+                  etichetta, b->name);
+        else
+            CHECK(ok, "%s: '%s' privo dell'arco %s verso '%s'", etichetta, b->name,
+                  want_kind == LAYOUT_EDGE_SUGGESTED ? "suggerito" : "continuo",
+                  want);
+    }
+
+    /* nessun ciclo fra gli archi */
+    for (size_t i = 0; i < bc; i++) {
+        size_t cur = i;
+        size_t passi = 0;
+        while (par[cur] != (size_t)-1 && passi <= bc) {
+            cur = par[cur];
+            passi++;
+        }
+        CHECK(passi <= bc, "%s: ciclo negli archi del layout partendo dal "
+                           "branch %zu",
+              etichetta, i);
+    }
+    free(par);
 }
 
 #endif

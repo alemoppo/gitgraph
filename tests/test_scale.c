@@ -18,6 +18,7 @@
 #include "config.h"
 #include "gitdata.h"
 #include "history.h"
+#include "layout.h"
 #include "util.h"
 
 #include <stdarg.h>
@@ -252,6 +253,12 @@ int main(int argc, char **argv)
     /* invariante anche sui repo grandi: ogni ramo con un tronco fra gli
      * antenati ha un padre o un padre suggerito che arriva al tronco */
     gg_check_trunk_ancestry(&h1, &data, "repo di scala");
+    {
+        Layout lay;
+        layout_build(&lay, &h1);
+        gg_check_layout(&lay, &h1, "repo di scala");
+        layout_free(&lay);
+    }
     CHECK(t_load + t_build <= budget,
           "budget superato: %.2f s > %.1f s", t_load + t_build, budget);
 

@@ -1,15 +1,17 @@
-/* dump_main.c - strumento di ispezione testuale (fase 1).
+/* dump_main.c - strumento di ispezione testuale.
  *
  * Uso: gitgraph_dump [--full] [--help] [percorso-repo]
  *   --full   stampa i messaggi di commit completi
  *
- * Stampa commit, riferimenti e modello dei branch (padre, stato, motivo).
- * Nessuna finestra grafica: serve ai test e alla verifica manuale.
+ * Stampa commit, riferimenti, modello dei branch (padre, stato, motivo) e la
+ * disposizione del grafo (corsie, righe, archi). Nessuna finestra grafica:
+ * serve ai test e alla verifica manuale.
  */
 #include "util.h"
 #include "config.h"
 #include "gitdata.h"
 #include "history.h"
+#include "layout.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -283,6 +285,32 @@ int main(int argc, char **argv)
                 printf("\n");
             }
         }
+
+        /* disposizione del grafo (fase 3): corsie e righe dei nodi, archi */
+        Layout lay;
+        layout_build(&lay, &hist);
+        printf("\nLAYOUT (branch: corsia, riga; corsia 0 = piu' a sinistra, "
+               "riga 0 = commit piu' recente)\n");
+        for (size_t i = 0; i < hist.branch_count; i++) {
+            const LayoutNode *nd = &lay.nodes[i];
+            if (nd->row == (size_t)-1)
+                printf("  %-20s corsia %4zu  riga    -\n", hist.branches[i].name,
+                       nd->lane);
+            else
+                printf("  %-20s corsia %4zu  riga %4zu\n", hist.branches[i].name,
+                       nd->lane, nd->row);
+        }
+        printf("\nARCHI (figlio -> padre; tratteggiato = padre suggerito)\n");
+        for (size_t e = 0; e < lay.edge_count; e++) {
+            printf("  %-20s -> %-20s %s\n",
+                   hist.branches[lay.edges[e].child].name,
+                   hist.branches[lay.edges[e].parent].name,
+                   lay.edges[e].kind == LAYOUT_EDGE_SUGGESTED ? "tratteggiato"
+                                                              : "continuo");
+        }
+        printf("\nlayout: %zu corsie, %zu righe, %zu archi\n", lay.lanes, lay.rows,
+               lay.edge_count);
+        layout_free(&lay);
 
         history_free(&hist);
         config_free(&cfg);

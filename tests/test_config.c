@@ -19,6 +19,7 @@
 #include "config.h"
 #include "gitdata.h"
 #include "history.h"
+#include "layout.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -910,6 +911,12 @@ static void test_end_to_end(void)
     /* invariante: ogni ramo con un tronco fra gli antenati ha un padre o un
      * padre suggerito che arriva al tronco */
     gg_check_trunk_ancestry(&hist, &data, "end-to-end con graph.cfg");
+    {
+        Layout lay;
+        layout_build(&lay, &hist);
+        gg_check_layout(&lay, &hist, "end-to-end con graph.cfg");
+        layout_free(&lay);
+    }
     const BranchNode *b2 = branch_named(&hist, "branch2");
     REQUIRE(b2 != NULL, "branch2 assente");
     /* branch2 e' nato da B2, che sta sulla catena di branch1 e anche su quella

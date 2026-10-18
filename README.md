@@ -11,7 +11,9 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
 - **Fase 1 (completata)**: lettura della storia, modello dei branch
   (padre/punto di diramazione/stato/motivazione), test automatici.
 - **Fase 2 (completata)**: parser di `graph.cfg` con wildcard e validazione.
-- Fasi successive: layout del grafo, disegno con SDL3/SDL3_ttf, interazione.
+- **Fase 3 (completata)**: disposizione del grafo (layout headless): nodi per
+  branch, corsie, righe e archi padre/suggerito; nessuna finestra.
+- Fasi successive: disegno con SDL3/SDL3_ttf, interazione.
 
 ## Struttura
 
@@ -19,11 +21,12 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
     src/gitdata.h/.c   lettura in sola lettura: commit e riferimenti
     src/config.h/.c    configurazione: parser di graph.cfg (wildcard, validazione)
     src/history.h/.c   modello dei branch dedotto dalla storia
+    src/layout.h/.c    disposizione del grafo (corsie, righe, archi)
     src/dump_main.c    strumento di ispezione testuale (gitgraph_dump)
     tests/             generatori del repo di prova e test automatici
     CMakeLists.txt     build con CMake
 
-`util`, `config`, `gitdata`, `history` non dipendono da SDL.
+`util`, `config`, `gitdata`, `history`, `layout` non dipendono da SDL.
 
 ## Requisiti
 
@@ -129,8 +132,9 @@ e la diagnostica su stderr.
 
     build/gitgraph_dump.exe [--full] [percorso-repo]
 
-Stampa commit (ordine topologico), riferimenti e modello dei branch con
-padre, stato e motivazione. `--full` mostra i messaggi di commit completi.
+Stampa commit (ordine topologico), riferimenti, modello dei branch con
+padre, stato e motivazione, e la disposizione del grafo (corsie, righe e
+archi). `--full` mostra i messaggi di commit completi.
 
 ## Modello dei branch (sintesi)
 
@@ -176,12 +180,13 @@ padre, stato e motivazione. `--full` mostra i messaggi di commit completi.
   ipotesi plausibile), `ambiguo` (piu' ipotesi indistinguibili: non si inventa
   un padre), `nessuno`. Si sceglie in quest'ordine: se il punto di diramazione
   e' la punta di un'altra famiglia, quella famiglia e' il padre (lo decide la
-  struttura); se fra i candidati c'e' un tronco, e' il padre (un long-lived non
-  si deduce, e' dichiarato); se un candidato ha integrato il branch con un
-  merge (la punta del branch sta nella sua storia), e' il padre (lo dice la
-  struttura; vale anche se e' nato dallo stesso punto, perche' il merge e' un
-  fatto); se resta un solo candidato nato prima del branch, e' il padre
-  dedotto. Due rami nati dallo **stesso punto di diramazione** (nessuno
+  struttura); se un candidato ha integrato il branch con un merge (la punta del
+  branch sta nella sua storia), e' il padre (lo dice la struttura; vale anche se
+  e' nato dallo stesso punto, perche' il merge e' un fatto); se fra i candidati
+  c'e' un tronco, e' il padre (un long-lived non si deduce, e' dichiarato); se
+  resta un solo candidato, e' il padre dedotto. Il tronco e il candidato unico
+  decidono pero' solo quando sul punto non ci sono fratelli. Due rami nati
+  dallo **stesso punto di diramazione** (nessuno
   contenente l'altro) sono sempre `ambigui` l'uno con l'altro, anche se il
   candidato e' uno solo: senza ordine di nascita la struttura non distingue
   chi e' nato prima, e l'unico modo per dirlo e' dichiararlo in `[parents]`.
@@ -191,10 +196,15 @@ padre, stato e motivazione. `--full` mostra i messaggi di commit completi.
   i candidati ambigui e' il piu' vecchio (col primo commit proprio piu'
   vecchio del branch), a parita' di date e' il nome, e la motivazione dichiara
   la base del suggerimento ("padre suggerito per data, poco affidabile con
-  rebase", oppure lo spareggio sul nome). Se nessun candidato e' piu' antico
-  del branch, il branch e' il piu' vecchio della diramazione e nessun padre e'
-  suggerito. Il grafo dei padri suggeriti non ha cicli. Serve al layout per
-  piazzare il branch in modo tratteggiato finche' il padre non e' dichiarato.
+  rebase", oppure lo spareggio sul nome). Se nessun fratello e' piu' antico del
+  branch (il ramo e' il piu' vecchio del gruppo), il suggerito e' il primo
+  antenato non fratello sotto il punto di diramazione, cioe' il ramo da cui il
+  gruppo si e' staccato (di solito il tronco): base `SUGGESTION_ANCESTOR` e
+  motivazione "nessun fratello piu' vecchio: padre suggerito '...'". Solo i veri
+  radice (nessun fratello piu' vecchio e nessun antenato non fratello sotto il
+  punto) restano senza suggerimento. Il grafo dei padri suggeriti non ha cicli.
+  Serve al layout per piazzare il branch in modo tratteggiato finche' il padre
+  non e' dichiarato.
 - **Gli ambigui si risolvono con `[parents]`**: finche' il padre non e'
   dichiarato in `graph.cfg`, il caso resta ambiguo e il layout mostra il
   suggerimento come tratteggio. Un override valido ha precedenza assoluta e
@@ -248,11 +258,34 @@ costruzione del modello: le regole nuove percorrono le catene piu' volte del
 vecchio contatore di proprietari, e le liste dei pari sostituiscono la matrice
 di relazioni `G x G`). I budget dei test sono 3 s, 30 s e 15 s.
 
+## Disposizione del grafo (layout)
+
+`gitgraph_dump` stampa anche la disposizione: un nodo per branch, con la corsia
+(colonna) e la riga (posizione topologica della punta, 0 = commit piu'
+recente), piu' gli archi.
+
+- **Nodi**: un nodo per riferimento, alla riga della sua punta. I riferimenti
+  con la stessa punta (specchi e alias) condividono riga e corsia: sono lo
+  stesso ramo e non finiscono in corsie diverse.
+- **Corsie**: i tronchi (long-lived) prendono le prime corsie, nell'ordine di
+  `[long-lived]`: il tronco e' la corsia 0. Gli altri rami seguono accanto al
+  proprio padre; fra fratelli viene prima il ramo nato prima (il primo commit
+  proprio piu' vecchio), senza guardare i nomi.
+- **Archi**: continui verso il padre certo, configurato o dedotto; tratteggiati
+  verso il padre **suggerito** di un caso ambiguo, da mostrare tratteggiato
+  finche' `[parents]` non dichiara il padre vero. Gli specchi non producono un
+  arco: sono lo stesso ramo.
+- **Nessun nome nelle scelte**: corsie e righe non cambiano se si rinominano i
+  riferimenti. Il test `invariance` confronta la disposizione in ogni
+  permutazione, insieme al resto del modello.
+- **Solo numeri, nessuna finestra**: la fase 3 calcola le posizioni; il disegno
+  con SDL3/SDL3_ttf resta alla fase successiva.
+
 ## Test
 
     ctest --test-dir build --output-on-failure
 
-Undici test, nessuno con finestra:
+Tredici test, nessuno con finestra:
 
 1. `make_test_repo` genera il repository di prova (la fixture rimuove prima la
    cartella dei repository di test, dentro la build);
@@ -281,30 +314,40 @@ Undici test, nessuno con finestra:
    repository di prova (override → stato `configurato`, long-lived senza fork
    né candidati, remoto con punta diversa che mantiene la genealogia dedotta) e
    motivazioni che non cominciano mai con un separatore "; " senza testo prima;
-4. `dump_smoke` esegue lo strumento di dump;
-5. `invariance` verifica che la genealogia non dipenda dall'ordine alfabetico:
+4. `layout` verifica la disposizione del grafo (fase 3): un nodo per branch
+   alla riga della sua punta, il tronco in corsia 0, i long-lived nelle prime
+   corsie secondo `[long-lived]`, i riferimenti sulla stessa punta (specchi,
+   alias) nella stessa corsia, archi continui verso il padre e tratteggiati
+   verso il suggerito (`branch1` -> `main`, `branch2` -> `branch1`), corsie
+   contigue 0..lanes-1 e determinismo. Le stesse regole sono ripetute su ogni
+   modello dalla proprieta' condivisa `gg_check_layout`;
+5. `dump_smoke` esegue lo strumento di dump;
+6. `invariance` verifica che la genealogia non dipenda dall'ordine alfabetico:
    per ogni gruppo di branch con nidificazione o fratelli (nel repository di
    prova `branch1`/`branch2`, `branch1`/`sp`, `oA`/`oB`/`oC`,
    `amb1`/`amb2`/`ambbase`, `feature-x`/`rb`/`rm`) costruisce tutte le
    permutazioni dei nomi (fino a 6 per gruppo) e confronta stato, padre,
-   candidati e padre suggerito **per punta di commit**; costruisce inoltre due
+   candidati, padre suggerito e disposizione (corsie, righe e archi) **per
+   punta di commit**; costruisce inoltre due
    repository piccoli nella directory temporanea (nidificazione e tre rami dallo
    stesso commit, anche con tutti i commit alla stessa ora, come nei repository
    generati in blocco) e li rimuove alla fine. L'unica cosa che non viene
    confrontata e' lo spareggio dichiarato sul nome a parita' di date: li' si
    verifica la base dello spareggio, non la scelta.
-6. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
+7. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
    3 s;
-7. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
+8. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
    30 s (determinismo verificato anche sul repository grande);
-8. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
+9. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
    15 s, con ogni branch nato dal precedente (catena profonda): verifica il
    controllo delle relazioni circolari e l'ordinamento dei padri;
-9. `invariance` verifica anche che il grafo dei padri suggeriti non contenga
-   cicli in nessuna permutazione, e costruisce i quattro casi di riproduzione
-   mk3 (due rami nati dallo stesso punto, modalita' A e B con i nomi in
-   entrambi gli ordini): tutti devono risultare `ambigui` con l'altro come
-   unico candidato e un solo padre suggerito per data.
+10. `invariance` verifica anche che il grafo dei padri suggeriti non contenga
+    cicli in nessuna permutazione, e costruisce i quattro casi di riproduzione
+    mk3 (due rami nati dallo stesso punto, modalita' A e B con i nomi in
+    entrambi gli ordini): tutti devono risultare `ambigui` con l'altro come
+    unico candidato e un solo padre suggerito per data;
+11. `encoding` verifica che i file di testo siano UTF-8 validi e senza mojibake
+    (script CMake, senza compilare).
 
 I repository di scala sono sintetici e deterministici: `tests/make_scale_repo.c`
 genera su stdout uno stream per `git fast-import` (commit su `main`, un
