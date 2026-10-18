@@ -123,7 +123,8 @@ static void print_commit_layout(const GitData *data, const History *hist,
     }
     printf("\nlayout: %zu commit, %zu corsie", lay->commit_count, lay->lanes);
     if (lay->anon_lane != (size_t)-1)
-        printf(" (anonima: %zu)", lay->anon_lane);
+        printf(" (corsie anonime: %zu..%zu)", lay->anon_lane,
+               lay->anon_lane + lay->anon_lane_count - 1);
     printf(", %zu archi tra commit\n", lay->cedge_count);
 }
 
@@ -364,6 +365,10 @@ int main(int argc, char **argv)
                 printf("  (etichetta di %s)", hist.branches[nd->label_of].name);
             printf("\n");
         }
+        if (lay.anon_lane != (size_t)-1)
+            printf("  %-20s corsie %zu..%zu  (commit senza proprietario)\n",
+                   "(blocco anonimo)", lay.anon_lane,
+                   lay.anon_lane + lay.anon_lane_count - 1);
         printf("\nARCHI (figlio -> padre; tratteggiato = padre suggerito)\n");
         for (size_t e = 0; e < lay.edge_count; e++) {
             printf("  %-20s -> %-20s %s\n",
@@ -376,6 +381,11 @@ int main(int argc, char **argv)
                "tra commit)\n",
                lay.lanes, lay.rows, lay.edge_count, lay.commit_count,
                lay.cedge_count);
+        if (lay.anon_lane != (size_t)-1)
+            printf("corsie anonime: %zu..%zu (%zu corsia%s, subito dopo i "
+                   "tronchi)\n",
+                   lay.anon_lane, lay.anon_lane + lay.anon_lane_count - 1,
+                   lay.anon_lane_count, lay.anon_lane_count == 1 ? "" : "e");
         layout_free(&lay);
 
         history_free(&hist);

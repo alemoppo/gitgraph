@@ -33,13 +33,32 @@
  *
  * COMMIT. Oltre ai nodi-branch, la disposizione assegna una RIGA e una CORSIA
  * a ogni commit del log: la riga e' la sua posizione topologica, la corsia e'
- * quella del ramo proprietario (History.commit_owner); i commit che nessun
- * ramo reclama (catena di un ramo sparito) finiscono nella corsia anonima,
- * in coda a tutte le altre. Gli archi tra commit sono di tre tipi:
- *   - LAYOUT_CEDGE_FIRST_PARENT (catena dei primi genitori);
- *   - LAYOUT_CEDGE_MERGE_PARENT (secondo genitore e successivi di un merge);
- *   - LAYOUT_CEDGE_BRANCH (diramazione: dal primo commit proprio di un ramo
- *     al suo punto di diramazione).
+ * quella del ramo proprietario (History.commit_owner).
+ *
+ * CORSIE ANONIME. I commit che nessun ramo reclama (la catena di un ramo
+ * sparito dopo un merge) sono raggruppati in CATENE: componenti connesse di
+ * commit anonimi unite dai primi genitori. Il blocco delle corsie anonime sta
+ * subito a destra dei tronchi, prima dei rami con nome: i commit senza
+ * proprietario restano cosi' accanto al tronco da cui pendono, senza spostare
+ * fuori i rami con nome. Le corsie del blocco si assegnano per intervalli di
+ * righe (colorazione greedy, in ordine di riga): l'intervallo di una catena va
+ * dalla riga del suo commit piu' recente a quella del genitore del suo commit
+ * piu' vecchio; due catene con intervalli sovrapposti stanno in corsie diverse,
+ * due no possono condividerne una. Cosi' nessun arco passa sopra il nodo di
+ * un'altra catena nella stessa corsia, ed e' il caso normale che N rami
+ * creati, mergiati e cancellati in sequenza usino una sola corsia anonima.
+ *
+ * ARCHI TRA COMMIT. Per ogni commit e ogni suo genitore c'e' un solo arco:
+ *   - LAYOUT_CEDGE_FIRST_PARENT: il primo genitore nella STESSA corsia (la
+ *     catena dei primi genitori che resta sulla corsia);
+ *   - LAYOUT_CEDGE_BRANCH: il primo genitore in un'ALTRA corsia. E' la
+ *     diramazione: parte dal commit proprietario piu' vecchio di un ramo (o
+ *     dal fondo di una catena anonima) e arriva al suo primo genitore. Il
+ *     punto di diramazione e' il primo genitore reale, non il campo fork del
+ *     modello; l'arco non esiste se il genitore e' nella stessa corsia, dove
+ *     duplicherebbe l'arco di catena;
+ *   - LAYOUT_CEDGE_MERGE_PARENT: il secondo genitore e i successivi di un
+ *     merge.
  *
  * INVARIANZA PER RINOMINA. La disposizione non dipende dai nomi: gli
  * ordinamenti usano solo la struttura (posizioni nel log, ordine di
@@ -76,15 +95,15 @@ typedef struct {
 } LayoutEdge;
 
 typedef enum {
-    LAYOUT_CEDGE_FIRST_PARENT, /* catena dei primi genitori */
+    LAYOUT_CEDGE_FIRST_PARENT, /* primo genitore nella stessa corsia */
     LAYOUT_CEDGE_MERGE_PARENT, /* secondo genitore (o successivo) di un merge */
-    LAYOUT_CEDGE_BRANCH        /* diramazione: primo commit proprio -> fork */
+    LAYOUT_CEDGE_BRANCH        /* primo genitore in un'altra corsia (fork) */
 } LayoutCommitEdgeKind;
 
 typedef struct {
     size_t commit; /* indice in GitData.commits */
     size_t row;    /* riga (posizione topologica, 0 = piu' recente) */
-    size_t lane;   /* corsia del proprietario, o quella anonima in coda */
+    size_t lane;   /* corsia del proprietario, o una del blocco anonimo */
     size_t owner;  /* indice del BranchNode proprietario, SIZE_MAX se anonimo */
 } LayoutCommit;
 
@@ -105,7 +124,9 @@ typedef struct {
     size_t commit_count;
     LayoutCommitEdge *cedges;
     size_t cedge_count;
-    size_t anon_lane; /* corsia dei commit senza proprietario, SIZE_MAX se nessuno */
+    size_t anon_lane;       /* prima corsia del blocco anonimo, SIZE_MAX se
+                               nessun commit e' senza proprietario */
+    size_t anon_lane_count; /* corsie del blocco anonimo (la sua larghezza) */
 
     size_t lanes; /* numero di corsie usate (branch e commit) */
 } Layout;

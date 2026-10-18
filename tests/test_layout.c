@@ -1,9 +1,9 @@
-/* test_layout.c - test automatici della disposizione del grafo (fase 3).
+/* test_layout.c - test automatici della disposizione del grafo (fase 3/4).
  *
  * Uso: test_layout <percorso-repo-di-test>
  *
- * Verifica, sul repository di prova e su un repository sintetico costruito
- * qui, che la disposizione sia coerente col modello e non dipenda dai nomi:
+ * Verifica, sul repository di prova e su repository sintetici costruiti qui,
+ * che la disposizione sia coerente col modello e non dipenda dai nomi:
  *  - un nodo per branch, con la riga della punta e la corsia della famiglia;
  *  - il tronco (long-lived) nella corsia 0, i long-lived nelle prime corsie;
  *  - i riferimenti sulla stessa punta (alias) nella stessa corsia; un remoto
@@ -11,15 +11,21 @@
  *    nome e' un'etichetta e non ha una corsia propria (label_of);
  *  - un arco tratteggiato verso il padre suggerito dei casi ambigui noti
  *    (branch1 -> main, branch2 -> branch1);
- *  - corsie contigue 0..lanes-1, con la corsia anonima in coda per i commit
- *    che nessun ramo reclama;
- *  - ogni commit con riga, corsia del proprietario (o anonima) e proprietario;
- *    la catena dei primi genitori di un tronco resta sulla sua corsia; l'arco
- *    di merge punta al secondo genitore; l'arco di diramazione va dal primo
- *    commit proprio al punto di fork;
- *  - tabella scritta a mano su un repository sintetico (main A,B,C; branch1
- *    B1,B2,B3 da B; branch2 C1,C2 da B2; merge --no-ff; origin/main in
- *    anticipo e upstream/main in ritardo);
+ *  - corsie contigue 0..lanes-1; il blocco anonimo (una o piu' corsie) sta
+ *    subito dopo i tronchi e nessun nodo-branch lo usa;
+ *  - ogni commit con riga, corsia del proprietario (o del blocco anonimo) e
+ *    proprietario; la catena dei primi genitori di un tronco resta sulla sua
+ *    corsia; l'arco di merge punta al secondo genitore; l'arco di diramazione
+ *    va dal commit proprietario piu' vecchio (o dal fondo di una catena
+ *    anonima) al suo primo genitore, in un'altra corsia;
+ *  - tabella scritta a mano (commit e archi tra commit) su un repository
+ *    sintetico (main A,B,C; branch1 B1,B2,B3 da B; branch2 C1,C2 da B2;
+ *    merge --no-ff; origin/main in anticipo e upstream/main in ritardo) e
+ *    tabella degli archi scritta a mano per il repository di prova;
+ *  - catene anonime: su un repository con due rami cancellati che si
+ *    sovrappongono (x e y) piu' un terzo creato dopo i merge (z) le catene
+ *    stanno in due corsie anonime (X e Y distinte, Z riusa); su un repository
+ *    con 30 rami creati, mergiati e cancellati in sequenza una sola corsia;
  *  - un modello artificiale con un ciclo di paternita': le famiglie che la
  *    visita in profondita' non raggiunge ricevono comunque una corsia;
  *  - determinismo: due costruzioni successive identiche.
@@ -99,19 +105,67 @@ static bool cedge_exists(const Layout *l, size_t from, size_t to,
     return false;
 }
 
-/* Indice del commit la cui prima riga di messaggio e' `subject` (o comincia
- * con `subject` seguito da ':'): i soggetti del repository di prova non sono
- * prefissi l'uno dell'altro. */
-static size_t commit_subject(const GitData *d, const char *subject)
+/* Indice dell'`occ`-esima occorrenza (0 = la piu' recente) di un commit la cui
+ * prima riga di messaggio e' `subject` (o comincia con `subject` seguito da
+ * ':'): i soggetti del repository di prova non sono prefissi l'uno dell'altro,
+ * tranne le due "RB1" (rb e rb-old) che si distinguono per occorrenza. */
+static size_t commit_subject_n(const GitData *d, const char *subject,
+                               unsigned occ)
 {
     size_t n = strlen(subject);
     for (size_t i = 0; i < d->commit_count; i++) {
         const char *m = d->commits[i].message;
         if (strncmp(m, subject, n) == 0 &&
-            (m[n] == '\0' || m[n] == '\n' || m[n] == '\r' || m[n] == ':'))
-            return i;
+            (m[n] == '\0' || m[n] == '\n' || m[n] == '\r' || m[n] == ':')) {
+            if (occ == 0)
+                return i;
+            occ--;
+        }
     }
     return NO_TIP;
+}
+
+static size_t commit_subject(const GitData *d, const char *subject)
+{
+    return commit_subject_n(d, subject, 0);
+}
+
+/* Carica un repository e ne costruisce modello e disposizione con la sola
+ * configurazione implicita (tronco main). Segnala l'errore e ritorna false. */
+static bool build_layout(const char *repo, GitData *data, GraphConfig *cfg,
+                         History *hist, Layout *lay)
+{
+    char err[1024];
+    if (!gitdata_load(data, repo, err, sizeof err)) {
+        CHECK(false, "repository '%s' non caricabile: %s", repo, err);
+        return false;
+    }
+    char **names = xmalloc((data->ref_count ? data->ref_count : 1) *
+                           sizeof(char *));
+    size_t nn = 0;
+    for (size_t i = 0; i < data->ref_count; i++)
+        if (data->refs[i].kind == REF_LOCAL_BRANCH)
+            names[nn++] = data->refs[i].name;
+    memset(cfg, 0, sizeof *cfg);
+    config_set_implicit_trunk(cfg, names, nn);
+    free(names);
+    if (!history_build(hist, data, cfg, err, sizeof err)) {
+        CHECK(false, "history_build su '%s': %s", repo, err);
+        config_free(cfg);
+        gitdata_free(data);
+        return false;
+    }
+    layout_build(lay, hist);
+    return true;
+}
+
+static void free_layout(GitData *data, GraphConfig *cfg, History *hist,
+                        Layout *lay)
+{
+    layout_free(lay);
+    history_free(hist);
+    config_free(cfg);
+    gitdata_free(data);
 }
 
 /* ---------- repository sintetico: tabella attesa scritta a mano ---------- */
@@ -373,6 +427,46 @@ static void check_table(const char *repo)
               strcmp(hist.branches[lay.commits[x].owner].name, "origin/main") == 0,
           "sintetico: X (in anticipo) non e' di origin/main o non e' figlio di M");
 
+    /* tabella scritta a mano degli archi tra commit: un arco per genitore, col
+     * tipo dedotto dalle corsie. B1 e C1 sono i commit proprietari piu' vecchi
+     * di branch1 e branch2: il loro primo genitore sta in un'altra corsia, e
+     * l'arco di diramazione va li' (B1 -> B, C1 -> B2), non al fork dedotto del
+     * modello. */
+    {
+        static const struct {
+            const char *from;
+            const char *to;
+            LayoutCommitEdgeKind kind;
+        } attesi[] = {
+            {"X", "M", LAYOUT_CEDGE_FIRST_PARENT},
+            {"M", "C", LAYOUT_CEDGE_FIRST_PARENT},
+            {"M", "C2", LAYOUT_CEDGE_MERGE_PARENT},
+            {"C2", "C1", LAYOUT_CEDGE_FIRST_PARENT},
+            {"C1", "B2", LAYOUT_CEDGE_BRANCH},
+            {"C", "B", LAYOUT_CEDGE_FIRST_PARENT},
+            {"B3", "B2", LAYOUT_CEDGE_FIRST_PARENT},
+            {"B2", "B1", LAYOUT_CEDGE_FIRST_PARENT},
+            {"B1", "B", LAYOUT_CEDGE_BRANCH},
+            {"B", "A", LAYOUT_CEDGE_FIRST_PARENT},
+        };
+        size_t n_attesi = sizeof attesi / sizeof attesi[0];
+        CHECK(lay.cedge_count == n_attesi,
+              "sintetico: %zu archi tra commit, attesi %zu", lay.cedge_count,
+              n_attesi);
+        for (size_t k = 0; k < n_attesi; k++) {
+            size_t from = commit_subject(&data, attesi[k].from);
+            size_t to = commit_subject(&data, attesi[k].to);
+            CHECK(from != NO_TIP && to != NO_TIP,
+                  "sintetico: commit '%s' o '%s' assente", attesi[k].from,
+                  attesi[k].to);
+            if (from == NO_TIP || to == NO_TIP)
+                continue;
+            CHECK(cedge_exists(&lay, from, to, attesi[k].kind),
+                  "sintetico: manca l'arco '%s' -> '%s' (tipo %d)",
+                  attesi[k].from, attesi[k].to, (int)attesi[k].kind);
+        }
+    }
+
     printf("sintetico: %zu righe, %zu corsie, %zu archi tra commit\n",
            lay.commit_count, lay.lanes, lay.cedge_count);
 
@@ -380,6 +474,183 @@ static void check_table(const char *repo)
     history_free(&hist);
     config_free(&cfg);
     gitdata_free(&data);
+}
+
+/* ---------- catene anonime: corsie con riuso ------------------------------ */
+
+/* main A; x (X1,X2) e y (Y1,Y2) da A; M1 su main; merge --no-ff di x e di y;
+ * z (Z1,Z2) dal merge di y; merge --no-ff di z; x, y e z cancellati. I sei
+ * commit di x/y/z restano anonimi: X e Y (stesso punto di diramazione A) si
+ * sovrappongono e stanno in corsie diverse, Z (creato dopo i due merge) non si
+ * sovrappone a nessuno dei due e riusa una corsia. */
+static bool make_xy_repo(const char *path, char *err, size_t err_size)
+{
+    back_to(g_work);
+    remove_tree(path);
+    CreateDirectoryA(path, NULL);
+    const char *init[] = {"init", "-b", "main", "-q", NULL};
+    if (!run_git(path, init, err, err_size))
+        return false;
+    long long t = 1773000000;
+    if (!commit_at(path, t, "A", err, err_size))
+        return false;
+    const char *cx[] = {"checkout", "-q", "-b", "x", "main", NULL};
+    if (!run_git(path, cx, err, err_size))
+        return false;
+    if (!commit_at(path, t + 60, "X1", err, err_size) ||
+        !commit_at(path, t + 120, "X2", err, err_size))
+        return false;
+    const char *cy[] = {"checkout", "-q", "-b", "y", "main", NULL};
+    if (!run_git(path, cy, err, err_size))
+        return false;
+    if (!commit_at(path, t + 180, "Y1", err, err_size) ||
+        !commit_at(path, t + 240, "Y2", err, err_size))
+        return false;
+    const char *cm[] = {"checkout", "-q", "main", NULL};
+    if (!run_git(path, cm, err, err_size))
+        return false;
+    if (!commit_at(path, t + 300, "M1", err, err_size) ||
+        !merge_at(path, t + 360, "x", "MX", err, err_size) ||
+        !merge_at(path, t + 420, "y", "MY", err, err_size))
+        return false;
+    const char *cz[] = {"checkout", "-q", "-b", "z", "main", NULL};
+    if (!run_git(path, cz, err, err_size))
+        return false;
+    if (!commit_at(path, t + 480, "Z1", err, err_size) ||
+        !commit_at(path, t + 540, "Z2", err, err_size))
+        return false;
+    if (!run_git(path, cm, err, err_size))
+        return false;
+    if (!merge_at(path, t + 600, "z", "MZ", err, err_size))
+        return false;
+    const char *dx[] = {"branch", "-D", "x", NULL};
+    const char *dy[] = {"branch", "-D", "y", NULL};
+    const char *dz[] = {"branch", "-D", "z", NULL};
+    return run_git(path, dx, err, err_size) &&
+           run_git(path, dy, err, err_size) && run_git(path, dz, err, err_size);
+}
+
+static void check_xy_repo(const char *repo)
+{
+    GitData data;
+    GraphConfig cfg;
+    History hist;
+    Layout lay;
+    if (!build_layout(repo, &data, &cfg, &hist, &lay))
+        return;
+    gg_check_layout(&lay, &hist, "x/y cancellati");
+
+    size_t x1 = commit_subject(&data, "X1");
+    size_t y1 = commit_subject(&data, "Y1");
+    size_t z1 = commit_subject(&data, "Z1");
+    CHECK(x1 != NO_TIP && y1 != NO_TIP && z1 != NO_TIP, "x/y: commit mancanti");
+    CHECK(lay.anon_lane != NO_TIP, "x/y: nessun blocco anonimo");
+    CHECK(lay.anon_lane_count == 2,
+          "x/y: %zu corsie anonime, attese 2 (X e Y sovrapposte, Z riusa)",
+          lay.anon_lane_count);
+    if (x1 != NO_TIP && y1 != NO_TIP && z1 != NO_TIP) {
+        CHECK(lay.commits[x1].owner == NO_TIP &&
+                  lay.commits[y1].owner == NO_TIP &&
+                  lay.commits[z1].owner == NO_TIP,
+              "x/y: x, y o z hanno un proprietario");
+        size_t lx = lay.commits[x1].lane;
+        size_t ly = lay.commits[y1].lane;
+        size_t lz = lay.commits[z1].lane;
+        CHECK(lx != ly, "x/y: X e Y nella stessa corsia %zu", lx);
+        CHECK(lz == lx || lz == ly,
+              "x/y: Z in corsia %zu non riusa ne' X (%zu) ne' Y (%zu)", lz, lx,
+              ly);
+        /* X2 -> X1 resta nella corsia anonima della catena */
+        size_t x2 = commit_subject(&data, "X2");
+        if (x2 != NO_TIP)
+            CHECK(lay.commits[x2].lane == lx &&
+                      cedge_exists(&lay, x2, x1, LAYOUT_CEDGE_FIRST_PARENT),
+                  "x/y: X2 non resta nella corsia di X1");
+        /* il fondo di ogni catena si dirama verso main (corsia 0) */
+        size_t a = commit_subject(&data, "A");
+        if (a != NO_TIP)
+            CHECK(cedge_exists(&lay, x1, a, LAYOUT_CEDGE_BRANCH) &&
+                      cedge_exists(&lay, y1, a, LAYOUT_CEDGE_BRANCH),
+                  "x/y: X1 o Y1 senza arco di diramazione verso A");
+        size_t my = commit_subject(&data, "MY");
+        if (my != NO_TIP)
+            CHECK(cedge_exists(&lay, z1, my, LAYOUT_CEDGE_BRANCH),
+                  "x/y: Z1 senza arco di diramazione verso MY");
+    }
+    printf("x/y/z cancellati: %zu corsie anonime (X e Y distinte, Z riusa)\n",
+           lay.anon_lane_count);
+
+    free_layout(&data, &cfg, &hist, &lay);
+}
+
+/* main A; n rami b1..bn, ognuno creato dalla punta corrente di main con un
+ * commit, poi mergiato --no-ff e cancellato. Gli n commit restano anonimi ma i
+ * loro intervalli non si sovrappongono: una sola corsia anonima. */
+static bool make_many_deleted_repo(const char *path, int n, char *err,
+                                   size_t err_size)
+{
+    back_to(g_work);
+    remove_tree(path);
+    CreateDirectoryA(path, NULL);
+    const char *init[] = {"init", "-b", "main", "-q", NULL};
+    if (!run_git(path, init, err, err_size))
+        return false;
+    long long t = 1774000000;
+    if (!commit_at(path, t, "A", err, err_size))
+        return false;
+    const char *cm[] = {"checkout", "-q", "main", NULL};
+    for (int i = 1; i <= n; i++) {
+        char br[16], subj[16], msg[16];
+        snprintf(br, sizeof br, "b%d", i);
+        snprintf(subj, sizeof subj, "C%d", i);
+        snprintf(msg, sizeof msg, "M%d", i);
+        const char *cb[] = {"checkout", "-q", "-b", br, "main", NULL};
+        if (!run_git(path, cb, err, err_size))
+            return false;
+        if (!commit_at(path, t + 60LL * i, subj, err, err_size))
+            return false;
+        if (!run_git(path, cm, err, err_size))
+            return false;
+        if (!merge_at(path, t + 60LL * i + 30, br, msg, err, err_size))
+            return false;
+        const char *db[] = {"branch", "-D", br, NULL};
+        if (!run_git(path, db, err, err_size))
+            return false;
+    }
+    return true;
+}
+
+static void check_many_deleted(const char *repo, int n)
+{
+    GitData data;
+    GraphConfig cfg;
+    History hist;
+    Layout lay;
+    if (!build_layout(repo, &data, &cfg, &hist, &lay))
+        return;
+    gg_check_layout(&lay, &hist, "rami cancellati in sequenza");
+
+    CHECK(lay.anon_lane != NO_TIP, "sequenza: nessun blocco anonimo");
+    CHECK(lay.anon_lane_count == 1,
+          "%d rami mergiati e cancellati: %zu corsie anonime, attesa 1", n,
+          lay.anon_lane_count);
+    for (int i = 1; i <= n; i++) {
+        char subj[16];
+        snprintf(subj, sizeof subj, "C%d", i);
+        size_t ci = commit_subject(&data, subj);
+        CHECK(ci != NO_TIP, "sequenza: commit '%s' assente", subj);
+        if (ci == NO_TIP)
+            continue;
+        CHECK(lay.commits[ci].owner == NO_TIP,
+              "sequenza: '%s' ha un proprietario", subj);
+        CHECK(lay.commits[ci].lane == lay.anon_lane,
+              "sequenza: '%s' in corsia %zu, attesa l'anonima %zu", subj,
+              lay.commits[ci].lane, lay.anon_lane);
+    }
+    printf("%d rami cancellati: %zu corsia anonima su %zu corsie totali\n", n,
+           lay.anon_lane_count, lay.lanes);
+
+    free_layout(&data, &cfg, &hist, &lay);
 }
 
 /* ---------- modello artificiale: ciclo di paternita' ---------------------- */
@@ -481,10 +752,12 @@ int main(int argc, char **argv)
             if (lay.nodes[i].lane < lay.lanes)
                 usata[lay.nodes[i].lane] = 1;
         }
-        if (lay.anon_lane != NO_TIP) {
-            CHECK(lay.anon_lane < lay.lanes, "corsia anonima fuori intervallo");
-            if (lay.anon_lane < lay.lanes)
-                usata[lay.anon_lane] = 1;
+        for (size_t k = 0; k < lay.anon_lane_count && lay.anon_lane != NO_TIP;
+             k++) {
+            size_t lane = lay.anon_lane + k;
+            CHECK(lane < lay.lanes, "corsia anonima %zu fuori intervallo", lane);
+            if (lane < lay.lanes)
+                usata[lane] = 1;
         }
         for (size_t k = 0; k < lay.lanes; k++)
             CHECK(usata[k], "corsia %zu non usata da nessuno", k);
@@ -590,16 +863,36 @@ int main(int argc, char **argv)
     }
 
     /* T1 sopravvive solo nel merge del branch temp (cancellato): nessun ramo
-     * lo reclama e finisce nella corsia anonima, in coda */
+     * lo reclama, e' una catena anonima di un solo commit nel blocco anonimo,
+     * subito dopo il tronco */
     size_t t1 = commit_subject(&data, "T1");
     REQUIRE(t1 != NO_TIP, "commit T1 assente");
     CHECK(lay.commits[t1].owner == NO_TIP,
           "T1 (branch cancellato) ha un proprietario");
-    CHECK(lay.anon_lane != NO_TIP && lay.commits[t1].lane == lay.anon_lane,
-          "T1 non e' nella corsia anonima");
-    CHECK(lay.anon_lane == lay.lanes - 1,
-          "la corsia anonima (%zu) non e' in coda a %zu corsie", lay.anon_lane,
-          lay.lanes);
+    CHECK(lay.anon_lane != NO_TIP && lay.anon_lane_count == 1 &&
+              lay.commits[t1].lane == lay.anon_lane,
+          "T1 non e' nella corsia anonima (blocco da %zu corsie in %zu)",
+          lay.anon_lane_count, lay.anon_lane);
+    CHECK(lay.anon_lane == 1,
+          "il blocco anonimo (%zu) non e' subito dopo il tronco (corsia 1)",
+          lay.anon_lane);
+    /* nessun nodo-branch usa una corsia del blocco anonimo */
+    for (size_t i = 0; i < lay.node_count; i++)
+        CHECK(lay.anon_lane == NO_TIP ||
+                  lay.nodes[i].lane < lay.anon_lane ||
+                  lay.nodes[i].lane >= lay.anon_lane + lay.anon_lane_count,
+              "'%s' (branch) usa la corsia anonima %zu", hist.branches[i].name,
+              lay.nodes[i].lane);
+    /* l'arco di diramazione della catena anonima va al genitore in un'altra
+     * corsia (non e' un arco di catena) */
+    {
+        size_t p = data.commits[t1].parent_count
+                       ? data.commits[t1].parent_idx[0]
+                       : NO_TIP;
+        CHECK(p != NO_TIP &&
+                  cedge_exists(&lay, t1, p, LAYOUT_CEDGE_BRANCH),
+              "T1: manca l'arco di diramazione verso il suo primo genitore");
+    }
 
     /* la catena dei primi genitori di main resta sulla corsia di main, dal
      * primo commit al fondo */
@@ -617,19 +910,97 @@ int main(int argc, char **argv)
         }
     }
 
-    /* l'arco di merge punta al secondo genitore; l'arco di diramazione va dal
-     * primo commit proprio al punto di fork */
+    /* l'arco di merge punta al secondo genitore; l'arco di diramazione parte
+     * dal commit proprietario piu' vecchio del ramo e va al suo primo genitore
+     * reale, in un'altra corsia (non usa il campo fork del modello) */
     {
         size_t m1 = commit_subject(&data, "Merge branch 'branch1' (--no-ff)");
         size_t second = data.commits[m1].parent_idx[1];
         CHECK(cedge_exists(&lay, m1, second, LAYOUT_CEDGE_MERGE_PARENT),
               "manca l'arco di merge verso il secondo genitore");
-        size_t own = hist.branches[bi].first_own_pos;
-        size_t fork = hist.branches[bi].fork_pos;
-        CHECK(own != NO_TIP && fork != NO_TIP &&
-                  cedge_exists(&lay, own, fork, LAYOUT_CEDGE_BRANCH),
-              "branch1: manca l'arco di diramazione dal primo commit proprio "
-              "al fork");
+        size_t oldest = NO_TIP;
+        for (size_t ci = 0; ci < lay.commit_count; ci++)
+            if (lay.commits[ci].owner == bi)
+                oldest = ci; /* riga crescente = verso il passato */
+        CHECK(oldest != NO_TIP, "branch1 non possiede commit");
+        if (oldest != NO_TIP) {
+            size_t p = data.commits[oldest].parent_count
+                           ? data.commits[oldest].parent_idx[0]
+                           : NO_TIP;
+            CHECK(p != NO_TIP &&
+                      lay.commits[oldest].lane != lay.commits[p].lane &&
+                      cedge_exists(&lay, oldest, p, LAYOUT_CEDGE_BRANCH),
+                  "branch1: manca l'arco di diramazione dal commit piu' vecchio "
+                  "(riga %zu) al suo primo genitore", oldest);
+        }
+    }
+
+    /* tabella scritta a mano degli archi tra commit del repository di prova:
+     * un arco per genitore, col tipo dedotto dalle corsie. `occ` distingue le
+     * due "RB1" (rb piu' recente, rb-old piu' vecchio). */
+    {
+        static const struct {
+            const char *from;
+            unsigned occ;
+            const char *to;
+            LayoutCommitEdgeKind kind;
+        } attesi[] = {
+            {"RB1", 0, "terza revisione", LAYOUT_CEDGE_BRANCH},
+            {"RB1", 1, "B", LAYOUT_CEDGE_BRANCH},
+            {"main: secondo merge di rm", 0, "main: primo merge di rm",
+             LAYOUT_CEDGE_FIRST_PARENT},
+            {"main: secondo merge di rm", 0, "RM2", LAYOUT_CEDGE_MERGE_PARENT},
+            {"RM2", 0, "RM1", LAYOUT_CEDGE_FIRST_PARENT},
+            {"main: primo merge di rm", 0, "D", LAYOUT_CEDGE_FIRST_PARENT},
+            {"main: primo merge di rm", 0, "RM1", LAYOUT_CEDGE_MERGE_PARENT},
+            {"RM1", 0, "terza revisione", LAYOUT_CEDGE_BRANCH},
+            {"D", 0, "F1", LAYOUT_CEDGE_FIRST_PARENT},
+            {"F1", 0, "Merge branch 'temp' (--no-ff)",
+             LAYOUT_CEDGE_FIRST_PARENT},
+            {"Merge branch 'temp' (--no-ff)", 0,
+             "Merge branch 'branch1' (--no-ff)", LAYOUT_CEDGE_FIRST_PARENT},
+            {"Merge branch 'temp' (--no-ff)", 0, "T1",
+             LAYOUT_CEDGE_MERGE_PARENT},
+            {"T1", 0, "Merge branch 'branch1' (--no-ff)", LAYOUT_CEDGE_BRANCH},
+            {"Merge branch 'branch1' (--no-ff)", 0, "terza revisione",
+             LAYOUT_CEDGE_FIRST_PARENT},
+            {"Merge branch 'branch1' (--no-ff)", 0, "B3",
+             LAYOUT_CEDGE_MERGE_PARENT},
+            {"SP2", 0, "SP1", LAYOUT_CEDGE_FIRST_PARENT},
+            {"SP1", 0, "B3", LAYOUT_CEDGE_BRANCH},
+            {"B3", 0, "B2", LAYOUT_CEDGE_FIRST_PARENT},
+            {"OB", 0, "R", LAYOUT_CEDGE_BRANCH},
+            {"OC", 0, "R", LAYOUT_CEDGE_BRANCH},
+            {"OA", 0, "R", LAYOUT_CEDGE_FIRST_PARENT},
+            {"AC2", 0, "AC1", LAYOUT_CEDGE_FIRST_PARENT},
+            {"AC1", 0, "X", LAYOUT_CEDGE_BRANCH},
+            {"X", 0, "A", LAYOUT_CEDGE_BRANCH},
+            {"C2", 0, "C1", LAYOUT_CEDGE_FIRST_PARENT},
+            {"C1", 0, "B2", LAYOUT_CEDGE_BRANCH},
+            {"B2", 0, "B1", LAYOUT_CEDGE_FIRST_PARENT},
+            {"B1", 0, "B", LAYOUT_CEDGE_BRANCH},
+            {"FX2", 0, "FX1", LAYOUT_CEDGE_FIRST_PARENT},
+            {"FX1", 0, "terza revisione", LAYOUT_CEDGE_BRANCH},
+            {"terza revisione", 0, "B", LAYOUT_CEDGE_FIRST_PARENT},
+            {"B", 0, "A", LAYOUT_CEDGE_FIRST_PARENT},
+        };
+        size_t n_attesi = sizeof attesi / sizeof attesi[0];
+        CHECK(lay.cedge_count == n_attesi,
+              "fixture: %zu archi tra commit, attesi %zu", lay.cedge_count,
+              n_attesi);
+        for (size_t k = 0; k < n_attesi; k++) {
+            size_t from =
+                commit_subject_n(&data, attesi[k].from, attesi[k].occ);
+            size_t to = commit_subject(&data, attesi[k].to);
+            CHECK(from != NO_TIP, "fixture: commit '%s' assente",
+                  attesi[k].from);
+            CHECK(to != NO_TIP, "fixture: commit '%s' assente", attesi[k].to);
+            if (from == NO_TIP || to == NO_TIP)
+                continue;
+            CHECK(cedge_exists(&lay, from, to, attesi[k].kind),
+                  "fixture: manca l'arco '%s' -> '%s' (tipo %d)",
+                  attesi[k].from, attesi[k].to, (int)attesi[k].kind);
+        }
     }
 
     /* determinismo: due costruzioni identiche (nodi, archi e commit) */
@@ -687,6 +1058,21 @@ int main(int argc, char **argv)
     REQUIRE(make_table_repo(path, err, sizeof err),
             "creazione del repository sintetico fallita");
     check_table(path);
+    back_to(g_work);
+    remove_tree(path);
+
+    /* catene anonime sovrapposte (x, y) e riuso della corsia (z) */
+    snprintf(path, sizeof path, "%s\\gg_layout_xy", root);
+    REQUIRE(make_xy_repo(path, err, sizeof err), "creazione del repo x/y fallita");
+    check_xy_repo(path);
+    back_to(g_work);
+    remove_tree(path);
+
+    /* 30 rami creati, mergiati e cancellati: una sola corsia anonima */
+    snprintf(path, sizeof path, "%s\\gg_layout_many", root);
+    REQUIRE(make_many_deleted_repo(path, 30, err, sizeof err),
+            "creazione del repo con 30 rami fallita");
+    check_many_deleted(path, 30);
     back_to(g_work);
     remove_tree(path);
 

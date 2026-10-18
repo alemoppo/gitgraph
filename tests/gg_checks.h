@@ -108,7 +108,117 @@ static void gg_check_trunk_ancestry(const History *h, const GitData *d,
     free(tronco);
 }
 
-/* PROPRIETA' DELLA DISPOSIZIONE (fase 3): il layout e' coerente col modello.
+/* CATENE ANONIME. I commit senza proprietario formano catene (componenti
+ * connesse unite dai primi genitori). In una stessa corsia del blocco anonimo i
+ * loro intervalli di righe non devono sovrapporsi: cosi' nessun arco passa
+ * sopra il nodo di un'altra catena. */
+static void gg_check_anon_chains(const Layout *l, const GitData *d,
+                                 const char *etichetta)
+{
+    size_t cc = d->commit_count;
+    if (l->anon_lane_count == 0 || l->anon_lane == (size_t)-1 || cc == 0 ||
+        !l->commits)
+        return;
+    size_t na = 0;
+    for (size_t ci = 0; ci < cc; ci++)
+        if (l->commits[ci].owner == (size_t)-1)
+            na++;
+    if (na == 0)
+        return;
+    size_t *alist = (size_t *)malloc(na * sizeof(size_t));
+    size_t *uf = (size_t *)malloc(cc * sizeof(size_t));
+    size_t *lo = (size_t *)malloc(cc * sizeof(size_t));
+    size_t *hi = (size_t *)malloc(cc * sizeof(size_t));
+    if (!alist || !uf || !lo || !hi) {
+        free(alist);
+        free(uf);
+        free(lo);
+        free(hi);
+        CHECK(false,
+              "%s: memoria esaurita nella proprieta' delle catene anonime",
+              etichetta);
+        return;
+    }
+    for (size_t ci = 0; ci < cc; ci++) {
+        uf[ci] = ci;
+        lo[ci] = cc;
+        hi[ci] = 0;
+    }
+    size_t k = 0;
+    for (size_t ci = 0; ci < cc; ci++) {
+        if (l->commits[ci].owner != (size_t)-1)
+            continue;
+        alist[k++] = ci;
+        if (d->commits[ci].parent_count == 0)
+            continue;
+        size_t p = d->commits[ci].parent_idx[0];
+        if (p == (size_t)-1 || p >= cc || l->commits[p].owner != (size_t)-1)
+            continue;
+        size_t a = p;
+        while (uf[a] != a) {
+            uf[a] = uf[uf[a]];
+            a = uf[a];
+        }
+        size_t b = ci;
+        while (uf[b] != b) {
+            uf[b] = uf[uf[b]];
+            b = uf[b];
+        }
+        if (a != b)
+            uf[a] = b;
+    }
+    /* intervallo di ogni catena: dal commit piu' recente (minimo) al genitore
+     * del piu' vecchio */
+    for (size_t i = 0; i < na; i++) {
+        size_t ci = alist[i];
+        size_t r = ci;
+        while (uf[r] != r) {
+            uf[r] = uf[uf[r]];
+            r = uf[r];
+        }
+        if (ci < lo[r])
+            lo[r] = ci;
+        size_t e = ci;
+        if (d->commits[ci].parent_count > 0) {
+            size_t p = d->commits[ci].parent_idx[0];
+            if (p != (size_t)-1 && p < cc)
+                e = p;
+        }
+        if (e > hi[r])
+            hi[r] = e;
+    }
+    for (size_t i = 0; i < na; i++) {
+        size_t ci = alist[i];
+        size_t ri = ci;
+        while (uf[ri] != ri) {
+            uf[ri] = uf[uf[ri]];
+            ri = uf[ri];
+        }
+        for (size_t j = i + 1; j < na; j++) {
+            size_t cj = alist[j];
+            if (l->commits[cj].lane != l->commits[ci].lane)
+                continue;
+            size_t rj = cj;
+            while (uf[rj] != rj) {
+                uf[rj] = uf[uf[rj]];
+                rj = uf[rj];
+            }
+            if (ri == rj)
+                continue;
+            CHECK(hi[ri] < lo[rj] || hi[rj] < lo[ri],
+                  "%s: due catene anonime nella corsia %zu con intervalli "
+                  "sovrapposti ([%zu,%zu] e [%zu,%zu])",
+                  etichetta, l->commits[ci].lane, lo[ri], hi[ri], lo[rj],
+                  hi[rj]);
+        }
+    }
+    free(alist);
+    free(uf);
+    free(lo);
+    free(hi);
+}
+
+/* PROPRIETA' DELLA DISPOSIZIONE (fase 3/4): il layout e' coerente col modello.
  *  - un nodo per branch, nella stessa riga della punta (o primo commit
  *    proprio se la punta e' fuori dal log);
  *  - corsia dentro [0, lanes); i riferimenti sulla stessa punta (stessa
@@ -118,9 +228,13 @@ static void gg_check_trunk_ancestry(const History *h, const GitData *d,
  *    padre e' un altro ramo, tratteggiato verso il suggerito se il caso e'
  *    ambiguo, nessuno altrimenti (gli specchi sono lo stesso ramo);
  *  - il grafo degli archi non ha cicli;
- *  - ogni commit ha una cella (riga = posizione topologica, corsia del
- *    proprietario o quella anonima) e gli archi tra commit sono di primo
- *    genitore, di merge e di diramazione, coerenti col grafo reale. */
+ *  - ogni commit ha una cella (riga = posizione topologica; corsia del
+ *    proprietario, o del blocco anonimo se nessun ramo lo reclama) e un solo
+ *    arco per genitore: di catena se il genitore e' nella stessa corsia, di
+ *    diramazione se salta in un'altra corsia (e in tal caso il genitore e' il
+ *    primo genitore reale), di merge dal secondo genitore in poi;
+ *  - le catene anonime di una stessa corsia hanno intervalli di righe
+ *    disgiunti: nessun arco passa sopra il nodo di un'altra catena. */
 static void gg_check_layout(const Layout *l, const History *h, const char *etichetta)
 {
     size_t bc = h->branch_count;
@@ -238,25 +352,28 @@ static void gg_check_layout(const Layout *l, const History *h, const char *etich
     free(par);
 
     /* COMMIT: una cella per commit, riga = posizione topologica, corsia del
-     * proprietario (o quella anonima in coda); gli archi tra commit hanno i
-     * tre tipi dichiarati e sono coerenti col grafo reale. */
+     * proprietario (o del blocco anonimo); gli archi tra commit hanno i tre
+     * tipi dichiarati, uno solo per genitore, coerenti col grafo reale. */
     const GitData *d = h->data;
     CHECK(l->commit_count == d->commit_count,
           "%s: layout con %zu commit per %zu nel log", etichetta,
           l->commit_count, d->commit_count);
-    size_t fp_attesi = 0, mp_attesi = 0;
+    size_t fp_attesi = 0, mp_attesi = 0, br_attesi = 0;
     for (size_t ci = 0; ci < d->commit_count; ci++) {
         const GitCommit *gc = &d->commits[ci];
         for (size_t k = 0; k < gc->parent_count; k++) {
-            if (gc->parent_idx[k] == (size_t)-1)
+            size_t p = gc->parent_idx[k];
+            if (p == (size_t)-1 || p >= d->commit_count)
                 continue;
-            if (k == 0)
+            if (k > 0)
+                mp_attesi++;
+            else if (l->commits[ci].lane == l->commits[p].lane)
                 fp_attesi++;
             else
-                mp_attesi++;
+                br_attesi++;
         }
     }
-    size_t fp = 0, mp = 0;
+    size_t fp = 0, mp = 0, br = 0;
     for (size_t ci = 0; ci < l->commit_count && ci < d->commit_count; ci++) {
         const LayoutCommit *cell = &l->commits[ci];
         CHECK(cell->commit == ci,
@@ -271,9 +388,12 @@ static void gg_check_layout(const Layout *l, const History *h, const char *etich
                   "%s: commit %zu proprietario %zu, atteso %zu", etichetta, ci,
                   cell->owner, h->commit_owner[ci]);
         if (cell->owner == (size_t)-1) {
-            CHECK(l->anon_lane != (size_t)-1 && cell->lane == l->anon_lane,
-                  "%s: commit %zu senza proprietario ma fuori dalla corsia "
-                  "anonima", etichetta, ci);
+            CHECK(l->anon_lane != (size_t)-1 &&
+                      cell->lane >= l->anon_lane &&
+                      cell->lane < l->anon_lane + l->anon_lane_count,
+                  "%s: commit %zu senza proprietario in corsia %zu, fuori dal "
+                  "blocco anonimo",
+                  etichetta, ci, cell->lane);
         } else {
             CHECK(cell->owner < bc, "%s: commit %zu proprietario %zu inesistente",
                   etichetta, ci, cell->owner);
@@ -282,17 +402,27 @@ static void gg_check_layout(const Layout *l, const History *h, const char *etich
                       "%s: commit %zu in corsia %zu ma il proprietario '%s' in "
                       "%zu", etichetta, ci, cell->lane,
                       h->branches[cell->owner].name, l->nodes[cell->owner].lane);
+            /* nessun nodo-branch sta in una corsia del blocco anonimo */
+            CHECK(!(cell->lane >= l->anon_lane &&
+                    cell->lane < l->anon_lane + l->anon_lane_count),
+                  "%s: il commit %zu (di '%s') usa una corsia anonima %zu",
+                  etichetta, ci, h->branches[cell->owner].name, cell->lane);
         }
-        /* la catena dei primi genitori resta sulla stessa corsia finche' il
-         * proprietario non cambia (il cambio e' il punto di diramazione) */
-        if (cell->owner != (size_t)-1 && d->commits[ci].parent_count > 0) {
+        /* la catena dei primi genitori resta sulla stessa corsia: finche' il
+         * proprietario non cambia, o finche' la catena resta anonima */
+        if (d->commits[ci].parent_count > 0) {
             size_t p = d->commits[ci].parent_idx[0];
-            if (p != (size_t)-1 && p < d->commit_count &&
-                l->commits[p].owner == cell->owner)
-                CHECK(l->commits[p].lane == cell->lane,
-                      "%s: commit %zu e primo genitore %zu con lo stesso "
-                      "proprietario ma corsie %zu e %zu", etichetta, ci, p,
-                      cell->lane, l->commits[p].lane);
+            if (p != (size_t)-1 && p < d->commit_count) {
+                bool stessa = cell->owner != (size_t)-1 &&
+                              l->commits[p].owner == cell->owner;
+                if (cell->owner == (size_t)-1 && l->commits[p].owner == (size_t)-1)
+                    stessa = true;
+                if (stessa)
+                    CHECK(l->commits[p].lane == cell->lane,
+                          "%s: commit %zu e primo genitore %zu con lo stesso "
+                          "proprietario ma corsie %zu e %zu", etichetta, ci, p,
+                          cell->lane, l->commits[p].lane);
+            }
         }
     }
     for (size_t ei = 0; ei < l->cedge_count; ei++) {
@@ -308,6 +438,10 @@ static void gg_check_layout(const Layout *l, const History *h, const char *etich
             CHECK(gc->parent_count > 0 && gc->parent_idx[0] == ce->to,
                   "%s: arco di primo genitore %zu -> %zu non e' il primo "
                   "genitore", etichetta, ce->from, ce->to);
+            CHECK(l->commits[ce->from].lane == l->commits[ce->to].lane,
+                  "%s: arco di primo genitore %zu -> %zu fra corsie diverse "
+                  "(%zu e %zu)", etichetta, ce->from, ce->to,
+                  l->commits[ce->from].lane, l->commits[ce->to].lane);
         } else if (ce->kind == LAYOUT_CEDGE_MERGE_PARENT) {
             mp++;
             bool trovato = false;
@@ -317,35 +451,22 @@ static void gg_check_layout(const Layout *l, const History *h, const char *etich
             CHECK(trovato, "%s: arco di merge %zu -> %zu non e' un secondo "
                            "genitore", etichetta, ce->from, ce->to);
         } else {
-            bool trovato = false;
-            for (size_t i = 0; i < bc && !trovato; i++)
-                if (l->nodes[i].label_of == (size_t)-1 &&
-                    h->branches[i].first_own_pos == ce->from &&
-                    h->branches[i].fork_pos == ce->to)
-                    trovato = true;
-            CHECK(trovato, "%s: arco di diramazione %zu -> %zu senza ramo "
-                           "corrispondente", etichetta, ce->from, ce->to);
+            br++;
+            CHECK(gc->parent_count > 0 && gc->parent_idx[0] == ce->to,
+                  "%s: arco di diramazione %zu -> %zu non e' il primo genitore",
+                  etichetta, ce->from, ce->to);
+            CHECK(l->commits[ce->from].lane != l->commits[ce->to].lane,
+                  "%s: arco di diramazione %zu -> %zu nella stessa corsia %zu",
+                  etichetta, ce->from, ce->to, l->commits[ce->from].lane);
         }
     }
     CHECK(fp == fp_attesi, "%s: %zu archi di primo genitore, attesi %zu",
           etichetta, fp, fp_attesi);
     CHECK(mp == mp_attesi, "%s: %zu archi di merge, attesi %zu", etichetta, mp,
           mp_attesi);
-    for (size_t i = 0; i < bc; i++) {
-        const BranchNode *b = &h->branches[i];
-        if (l->nodes[i].label_of != (size_t)-1 ||
-            b->first_own_pos == (size_t)-1 || b->fork_pos == (size_t)-1 ||
-            b->first_own_pos == b->fork_pos)
-            continue;
-        bool trovato = false;
-        for (size_t ei = 0; ei < l->cedge_count && !trovato; ei++)
-            if (l->cedges[ei].kind == LAYOUT_CEDGE_BRANCH &&
-                l->cedges[ei].from == b->first_own_pos &&
-                l->cedges[ei].to == b->fork_pos)
-                trovato = true;
-        CHECK(trovato, "%s: '%s' senza arco di diramazione %zu -> %zu",
-              etichetta, b->name, b->first_own_pos, b->fork_pos);
-    }
+    CHECK(br == br_attesi, "%s: %zu archi di diramazione, attesi %zu", etichetta,
+          br, br_attesi);
+    gg_check_anon_chains(l, d, etichetta);
 }
 
 #endif

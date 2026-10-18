@@ -15,7 +15,7 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
   branch, corsie, righe e archi padre/suggerito; nessuna finestra.
 - **Fase 4 (completata)**: layout dei commit (riga, corsia, proprietario,
   archi tra commit), etichette dei riferimenti remoti sulla corsia del locale,
-  corsia anonima; `gitgraph_dump --layout`.
+  catene anonime con corsie riusabili; `gitgraph_dump --layout`.
 - Fasi successive: disegno con SDL3/SDL3_ttf, interazione.
 
 ## Struttura
@@ -161,8 +161,8 @@ la tabella dei commit (riga, corsia, proprietario) e gli archi tra commit.
   non risale oltre. L'ordine fra rami dello stesso gruppo usa la struttura e
   l'eta' dei rami, mai il nome. Un commit che nessun ramo reclama (la catena di
   un ramo cancellato dopo un merge: e' raggiungibile, ma non appartiene piu' a
-  nessuno) resta senza proprietario e il layout lo mette nella **corsia
-  anonima**, in coda a tutte le altre.
+  nessuno) resta senza proprietario e il layout lo raggruppa in **catene
+  anonime** (vedi la disposizione del grafo).
 - **Il nome non decide niente**: l'ordine alfabetico non entra in nessuna
   regola; i confronti fra famiglie usano la struttura dei commit e, quando
   serve, l'orario dei commit (dato di Git). Il test `invariance` permuta i
@@ -283,11 +283,12 @@ e gli archi tra commit.
   con la stessa punta (alias) condividono riga e corsia: sono lo stesso ramo e
   non finiscono in corsie diverse.
 - **Corsie**: i tronchi (long-lived) prendono le prime corsie, nell'ordine di
-  `[long-lived]`: il tronco e' la corsia 0. Gli altri rami seguono accanto al
-  proprio padre; fra fratelli viene prima il ramo nato prima (il primo commit
-  proprio piu' vecchio), senza guardare i nomi. Le famiglie che la visita in
-  profondita' non raggiunge (un ciclo di paternita', possibile solo in un
-  modello artificiale) ricevono comunque una corsia, in coda.
+  `[long-lived]`: il tronco e' la corsia 0. Subito dopo i tronchi viene il
+  **blocco anonimo** (vedi sotto); poi gli altri rami, accanto al proprio padre;
+  fra fratelli viene prima il ramo nato prima (il primo commit proprio piu'
+  vecchio), senza guardare i nomi. Le famiglie che la visita in profondita' non
+  raggiunge (un ciclo di paternita', possibile solo in un modello artificiale)
+  ricevono comunque una corsia, in coda.
 - **Etichette remote**: un riferimento remoto la cui punta sta sulla catena dei
   primi genitori del branch **locale con lo stesso nome** (in anticipo o in
   ritardo) non ha una corsia propria: e' un'etichetta del locale e ne condivide
@@ -304,12 +305,26 @@ e gli archi tra commit.
   remote e i riferimenti della stessa famiglia non producono un arco: sono lo
   stesso ramo.
 - **Commit**: ogni commit ha una riga (la sua posizione topologica, la stessa
-  del dump) e una corsia: quella del ramo che lo possiede, oppure la corsia
-  anonima in coda se non lo possiede nessuno. Gli archi tra commit hanno un
-  tipo esplicito: **primo genitore** (la catena), **genitore di merge** (secondo
-  genitore e successivi) e **diramazione** (dal primo commit proprio di un ramo
-  al suo punto di fork). La catena dei primi genitori di un ramo resta sulla
-  sua corsia finche' il proprietario non cambia: il cambio e' il fork.
+  del dump) e una corsia: quella del ramo che lo possiede. Gli archi tra commit
+  hanno un tipo esplicito, uno solo per genitore: **primo genitore** (il
+  genitore nella stessa corsia, la catena), **genitore di merge** (secondo
+  genitore e successivi) e **diramazione** (il primo genitore in un'altra
+  corsia). L'arco di diramazione parte dal commit proprietario piu' vecchio di
+  un ramo (o dal fondo di una catena anonima) e va al suo primo genitore reale,
+  non al punto di fork del modello: cosi' non duplica mai un arco di catena.
+- **Catene anonime**: i commit che nessun ramo reclama sono raggruppati in
+  catene, componenti connesse unite dai primi genitori. Il blocco delle corsie
+  anonime sta subito a destra dei tronchi e prima dei rami con nome (i commit
+  orfani restano accanto al tronco da cui pendono); nessun nodo-branch usa una
+  corsia del blocco. Le corsie si assegnano con una colorazione di intervalli,
+  in ordine di riga: l'intervallo di una catena va dalla riga del suo commit
+  piu' recente a quella del genitore del suo commit piu' vecchio; due catene con
+  intervalli sovrapposti stanno in corsie diverse, due no possono condividerne
+  una. Cosi' nessun arco passa sopra il nodo di un'altra catena nella stessa
+  corsia, ed e' il caso normale che N rami creati, mergiati e cancellati in
+  sequenza usino **una sola** corsia anonima. La larghezza del blocco e'
+  `anon_lane_count` (le corsie vanno da `anon_lane` a `anon_lane +
+  anon_lane_count - 1`).
 - **Nessun nome nelle scelte**: corsie, righe e proprietari non cambiano se si
   rinominano i riferimenti. Il test `invariance` confronta la disposizione
   (branch e commit) in ogni permutazione, insieme al resto del modello.
@@ -352,26 +367,33 @@ Tredici test, nessuno con finestra:
    repository di prova (override → stato `configurato`, long-lived senza fork
    né candidati, remoto con punta diversa che mantiene la genealogia dedotta) e
    motivazioni che non cominciano mai con un separatore "; " senza testo prima;
-4. `layout` verifica la disposizione del grafo (fase 3): un nodo per branch
+4. `layout` verifica la disposizione del grafo (fase 3/4): un nodo per branch
    alla riga della sua punta, il tronco in corsia 0, i long-lived nelle prime
    corsie secondo `[long-lived]`, gli alias sulla stessa punta nella stessa
    corsia, le **etichette remote** (`origin/main`, `upstream/main` sulla
    corsia di `main`; `origin/branch1` etichetta di `branch1`), archi continui
    verso il padre e tratteggiati verso il suggerito (`branch1` -> `main`,
-   `branch2` -> `branch1`), corsie contigue 0..lanes-1. Verifica inoltre la
-   **disposizione dei commit**: una cella per commit con riga e proprietario
-   attesi (`A`,`B`,`C` a `main`; `B1`..`B3` a `branch1`; `C1`,`C2` a
-   `branch2`; il merge a `main`), la catena dei primi genitori del tronco
-   sulla sua corsia, l'arco di merge verso il secondo genitore, l'arco di
-   diramazione, il commit `T1` (branch cancellato) nella corsia anonima in
-   coda e il determinismo (nodi, archi, commit). Su un repository sintetico
-   costruito dal test (main `A`,`B`,`C`; `branch1` `B1`,`B2`,`B3` da `B`;
-   `branch2` `C1`,`C2` da `B2`; merge `--no-ff`; `origin/main` in anticipo e
-   `upstream/main` in ritardo) confronta una **tabella scritta a mano**. Infine
-   un modello artificiale con un ciclo di paternita' verifica che le famiglie
-   che la visita in profondita' non raggiunge ricevano comunque una corsia. Le
-   stesse regole sono ripetute su ogni modello dalla proprieta' condivisa
-   `gg_check_layout`;
+   `branch2` -> `branch1`), corsie contigue 0..lanes-1 col **blocco anonimo**
+   subito dopo i tronchi. Verifica inoltre la **disposizione dei commit**: una
+   cella per commit con riga, corsia e proprietario attesi (`A`,`B`,`C` a
+   `main`; `B1`..`B3` a `branch1`; `C1`,`C2` a `branch2`; il merge a `main`), la
+   catena dei primi genitori del tronco sulla sua corsia, l'arco di merge verso
+   il secondo genitore, l'arco di diramazione dal commit proprietario piu'
+   vecchio al suo primo genitore reale (in un'altra corsia), il commit `T1`
+   (branch cancellato) nella corsia anonima e il determinismo (nodi, archi,
+   commit). Su un repository sintetico costruito dal test (main `A`,`B`,`C`;
+   `branch1` `B1`,`B2`,`B3` da `B`; `branch2` `C1`,`C2` da `B2`; merge
+   `--no-ff`; `origin/main` in anticipo e `upstream/main` in ritardo) confronta
+   due **tabelle scritte a mano**, dei commit e degli archi tra commit. Su un
+   repository con due rami cancellati che si sovrappongono (`x`, `y`) piu' un
+   terzo (`z`) creato dopo i merge verifica che le catene stiano in due corsie
+   anonime (X e Y distinte, Z riusa), e su uno con 30 rami creati, mergiati e
+   cancellati in sequenza che basti **una sola** corsia anonima. Infine un
+   modello artificiale con un ciclo di paternita' verifica che le famiglie che
+   la visita in profondita' non raggiunge ricevano comunque una corsia. Le
+   stesse regole (compresa la proprieta' che nessun arco passi sopra il nodo di
+   un'altra catena nella stessa corsia) sono ripetute su ogni modello dalla
+   proprieta' condivisa `gg_check_layout`;
 5. `dump_smoke` esegue lo strumento di dump;
 6. `invariance` verifica che la genealogia non dipenda dall'ordine alfabetico:
    per ogni gruppo di branch con nidificazione o fratelli (nel repository di

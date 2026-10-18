@@ -266,7 +266,7 @@ int main(int argc, char **argv)
               "%zu corsie per %zu rami (nessun remoto nel generatore: attese "
               "pari)",
               lay.lanes, h1.branch_count);
-        CHECK(lay.anon_lane == (size_t)-1,
+        CHECK(lay.anon_lane == (size_t)-1 && lay.anon_lane_count == 0,
               "il repo di scala non ha commit senza proprietario");
         layout_free(&lay);
     }
