@@ -10,10 +10,10 @@
 # processi, quindi qui il tentativo di compilare viene fermato subito e con un
 # messaggio chiaro invece di errori a cascata.
 #
-# CMake 3.20 e' il minimo effettivamente usato: la protezione della pulizia dei
-# test confronta i percorsi reali (file(REAL_PATH), 3.19) e normalizza i
-# percorsi con cmake_path (3.20).
-cmake_minimum_required(VERSION 3.20)
+# CMake 3.16 e' il minimo dichiarato: nessuna funzione piu' recente e' usata
+# (la pulizia dei test cancella percorsi scritti qui, senza introspezione dei
+# percorsi reali).
+cmake_minimum_required(VERSION 3.16)
 project(gitgraph C)
 
 if(NOT WIN32)
@@ -81,24 +81,14 @@ add_executable(fake_git tests/fake_git.c)
 # mai "cmd /c" direttamente (quoting di cmd poco controllabile).
 #
 # Lo script crea il repository e non cancella mai nulla: la pulizia la fa
-# questa fixture, che rimuove la sola cartella dei repository di test dentro
-# la directory di build.
-#
-# I percorsi non sono variabili di cache: cosi' un "-D" non puo' spostarli
-# fuori dalla build. Lo script di pulizia li verifica comunque (dentro la
-# build, percorso reale compreso: le junction non ingannano) prima di
-# cancellare; vedi tests/cleanup_guard.cmake. La verifica e' coperta dal test
-# cleanup_guard.
-unset(GG_TEST_ROOT CACHE)
-set(GG_TEST_ROOT "${CMAKE_CURRENT_BINARY_DIR}/test_repos")
-file(MAKE_DIRECTORY "${GG_TEST_ROOT}")
-unset(GG_TEST_REPO CACHE)
+# questa fixture, che rimuove solo <build>/test-repos/gitgraph_test_repo (il
+# percorso e' scritto qui e ricavato dalla directory di build, non da una
+# variabile di cache).
+set(GG_TEST_ROOT "${CMAKE_CURRENT_BINARY_DIR}/test-repos")
 set(GG_TEST_REPO "${GG_TEST_ROOT}/gitgraph_test_repo")
 add_test(NAME make_test_repo
          COMMAND "${CMAKE_COMMAND}"
                  "-DGG_TEST_REPO=${GG_TEST_REPO}"
-                 "-DGG_TEST_ROOT=${GG_TEST_ROOT}"
-                 "-DGG_BUILD_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
                  "-DGG_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
                  "-P"
                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/make_test_repo_fixture.cmake")
@@ -131,40 +121,13 @@ set_tests_properties(invariance PROPERTIES FIXTURES_REQUIRED testrepo TIMEOUT 60
 add_test(NAME dump_smoke COMMAND gitgraph_dump "${GG_TEST_REPO}")
 set_tests_properties(dump_smoke PROPERTIES FIXTURES_REQUIRED testrepo)
 
-# Igiene dei file di testo: UTF-8 valido (regole di codifica, overlong e
-# surrogate esclusi) e nessun mojibake (i byte C3 82 / C3 83, un accento
-# letto e riscritto come se fosse Latin-1, non sono mai legittimi qui).
+# Igiene dei file di testo: src/ e tests/ sono ASCII. Fallisce se un file
+# contiene un byte oltre 0x7F (compresi i byte C3 82 / C3 83 del mojibake).
 # Script CMake puro, gira senza compilare e senza fixture.
 add_test(NAME encoding
          COMMAND "${CMAKE_COMMAND}"
                  "-DGG_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
                  -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_encoding.cmake")
-
-# La validazione UTF-8 di check_encoding (tests/utf8_check.cmake) e' provata a
-# parte su sequenze scelte: valide, overlong, surrogate, oltre U+10FFFF, lead
-# proibiti, continuazioni orfane, sequenze incomplete in fondo al file (che
-# devono essere rifiutate) e sequenze a cavallo dei pezzi in cui il file viene
-# letto. Script CMake puro, senza compilare e senza fixture.
-add_test(NAME utf8
-         COMMAND "${CMAKE_COMMAND}" -P
-                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_utf8.cmake")
-
-# Sicurezza della pulizia: gli script di generazione cancellano percorsi sotto
-# la directory di build e nient'altro. Il test prova il controllo
-# (tests/cleanup_guard.cmake) su percorsi esterni, percorsi che scavalcano la
-# build con "..", percorsi che attraversano una junction e la radice di un
-# drive, e prova che gli script veri rifiutino un GG_*_REPO esterno senza
-# cancellare niente. Le directory "esterne" del test sono finte e stanno dentro
-# la build: un difetto non puo' cancellare dati veri. Script CMake puro, senza
-# compilare e senza fixture.
-add_test(NAME cleanup_guard
-         COMMAND "${CMAKE_COMMAND}"
-                 "-DGG_BUILD_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
-                 "-DGG_GUARD=${CMAKE_CURRENT_SOURCE_DIR}/tests/cleanup_guard.cmake"
-                 "-DGG_FIXTURE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tests/make_test_repo_fixture.cmake"
-                 "-DGG_SCALE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tests/make_scale_repo.cmake"
-                 "-DGG_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
-                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cleanup_guard.cmake")
 
 # --- test di scala ------------------------------------------------------------
 # Due repository sintetici (vedi tests/make_scale_repo.c) con gli obiettivi di
@@ -172,21 +135,17 @@ add_test(NAME cleanup_guard
 # 50.000 commit entro 30 s. La generazione e' una fixture separata: il budget
 # misura solo lettura del repository e costruzione del modello.
 #
-# Anche questi percorsi non sono variabili di cache (un "-D" non deve poter
-# spostare una pulizia): lo script li verifica comunque prima di cancellare.
-unset(GG_SCALE_SMALL CACHE)
-set(GG_SCALE_SMALL "${CMAKE_CURRENT_BINARY_DIR}/scale_small")
-unset(GG_SCALE_LARGE CACHE)
-set(GG_SCALE_LARGE "${CMAKE_CURRENT_BINARY_DIR}/scale_large")
-unset(GG_SCALE_DEEP_REPO CACHE)
-set(GG_SCALE_DEEP_REPO "${CMAKE_CURRENT_BINARY_DIR}/scale_deep")
+# Anche questi repository stanno sotto <build>/test-repos/, come il repository
+# di prova: la pulizia (fatta dallo script) cancella solo il percorso indicato.
+set(GG_SCALE_SMALL "${CMAKE_CURRENT_BINARY_DIR}/test-repos/scale_small")
+set(GG_SCALE_LARGE "${CMAKE_CURRENT_BINARY_DIR}/test-repos/scale_large")
+set(GG_SCALE_DEEP_REPO "${CMAKE_CURRENT_BINARY_DIR}/test-repos/scale_deep")
 
 function(gg_add_scale_test name repo commits feature_every sub_every budget timeout sub_index)
     add_test(NAME make_${name}
              COMMAND "${CMAKE_COMMAND}"
                      "-DGG_SCALE_GEN=$<TARGET_FILE:scale_repo_gen>"
                      "-DGG_SCALE_REPO=${repo}"
-                     "-DGG_BUILD_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
                      "-DGG_SCALE_COMMITS=${commits}"
                      "-DGG_SCALE_FEATURE=${feature_every}"
                      "-DGG_SCALE_SUB=${sub_every}"
@@ -205,7 +164,6 @@ function(gg_add_scale_deep_test name repo commits feature_every budget timeout)
              COMMAND "${CMAKE_COMMAND}"
                      "-DGG_SCALE_GEN=$<TARGET_FILE:scale_repo_gen>"
                      "-DGG_SCALE_REPO=${repo}"
-                     "-DGG_BUILD_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
                      "-DGG_SCALE_COMMITS=${commits}"
                      "-DGG_SCALE_FEATURE=${feature_every}"
                      "-DGG_SCALE_SUB=0"

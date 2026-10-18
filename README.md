@@ -13,6 +13,9 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
 - **Fase 2 (completata)**: parser di `graph.cfg` con wildcard e validazione.
 - **Fase 3 (completata)**: disposizione del grafo (layout headless): nodi per
   branch, corsie, righe e archi padre/suggerito; nessuna finestra.
+- **Fase 4 (completata)**: layout dei commit (riga, corsia, proprietario,
+  archi tra commit), etichette dei riferimenti remoti sulla corsia del locale,
+  corsia anonima; `gitgraph_dump --layout`.
 - Fasi successive: disegno con SDL3/SDL3_ttf, interazione.
 
 ## Struttura
@@ -21,7 +24,7 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
     src/gitdata.h/.c   lettura in sola lettura: commit e riferimenti
     src/config.h/.c    configurazione: parser di graph.cfg (wildcard, validazione)
     src/history.h/.c   modello dei branch dedotto dalla storia
-    src/layout.h/.c    disposizione del grafo (corsie, righe, archi)
+    src/layout.h/.c    disposizione del grafo (corsie, righe, archi; commit)
     src/dump_main.c    strumento di ispezione testuale (gitgraph_dump)
     tests/             generatori del repo di prova e test automatici
     CMakeLists.txt     build con CMake
@@ -36,7 +39,7 @@ non c'è un porting per Linux/macOS e il tentativo di compilare altrove viene
 fermato subito da CMake con un messaggio esplicito.
 
 - Windows con Git nel PATH.
-- Un compilatore C11 e CMake >= 3.20.
+- Un compilatore C11 e CMake >= 3.16.
 - Per la GUI (dalle fasi successive): SDL3 e SDL3_ttf.
 
 ### MSYS2 UCRT64 (configurazione verificata)
@@ -130,11 +133,12 @@ e la diagnostica su stderr.
 
 ## Uso
 
-    build/gitgraph_dump.exe [--full] [percorso-repo]
+    build/gitgraph_dump.exe [--full] [--layout] [percorso-repo]
 
 Stampa commit (ordine topologico), riferimenti, modello dei branch con
 padre, stato e motivazione, e la disposizione del grafo (corsie, righe e
-archi). `--full` mostra i messaggi di commit completi.
+archi). `--full` mostra i messaggi di commit completi. `--layout` stampa solo
+la tabella dei commit (riga, corsia, proprietario) e gli archi tra commit.
 
 ## Modello dei branch (sintesi)
 
@@ -148,14 +152,17 @@ archi). `--full` mostra i messaggi di commit completi.
   dipende dall'ordine dei nomi: un branch che incontra la **punta** di un
   altro ramo si e' diramato li'; i tronchi (long-lived) proseguono sempre, per
   che non possono essere una diramazione di un altro ramo.
-- **Proprietario e commit condivisi**: solo i tronchi possiedono commit in modo
-  incondizionato (fra due tronchi che si incontrano vale il primo nell'ordine
-  di `[long-lived]`, cioe' quello dichiarato). Un commit sulla catena di due o
-  piu' famiglie non-tronco, senza un tronco che lo contenga, e' **condiviso**:
-  non ha un proprietario e nessun branch se lo rivendica "per primo". E' il
-  punto in cui il modello precedente sbagliava: la famiglia visitata per prima
-  (quella col nome alfabeticamente minore) se lo prendeva e gli altri la
-  trattavano come diramazione da lei.
+- **Proprietario dei commit**: ogni commit del log ha un proprietario, uno
+  solo, esportato dal modello (`History.commit_owner`). I tronchi reclamano la
+  loro catena dei primi genitori per primi, nell'ordine di `[long-lived]`; poi
+  ogni altro ramo reclama, risalendo dalla punta, i commit non ancora
+  assegnati, fermandosi al primo gia' assegnato (il suo punto di diramazione).
+  Un padre reclama sempre prima dei figli, cosi' il figlio si ferma al fork e
+  non risale oltre. L'ordine fra rami dello stesso gruppo usa la struttura e
+  l'eta' dei rami, mai il nome. Un commit che nessun ramo reclama (la catena di
+  un ramo cancellato dopo un merge: e' raggiungibile, ma non appartiene piu' a
+  nessuno) resta senza proprietario e il layout lo mette nella **corsia
+  anonima**, in coda a tutte le altre.
 - **Il nome non decide niente**: l'ordine alfabetico non entra in nessuna
   regola; i confronti fra famiglie usano la struttura dei commit e, quando
   serve, l'orario dei commit (dato di Git). Il test `invariance` permuta i
@@ -268,22 +275,44 @@ di relazioni `G x G`). I budget dei test sono 3 s, 30 s e 15 s.
 
 `gitgraph_dump` stampa anche la disposizione: un nodo per branch, con la corsia
 (colonna) e la riga (posizione topologica della punta, 0 = commit piu'
-recente), piu' gli archi.
+recente), piu' gli archi. `--layout` mostra invece la disposizione a livello di
+commit: una riga per commit, con la corsia del proprietario e il proprietario,
+e gli archi tra commit.
 
 - **Nodi**: un nodo per riferimento, alla riga della sua punta. I riferimenti
-  con la stessa punta (specchi e alias) condividono riga e corsia: sono lo
-  stesso ramo e non finiscono in corsie diverse.
+  con la stessa punta (alias) condividono riga e corsia: sono lo stesso ramo e
+  non finiscono in corsie diverse.
 - **Corsie**: i tronchi (long-lived) prendono le prime corsie, nell'ordine di
   `[long-lived]`: il tronco e' la corsia 0. Gli altri rami seguono accanto al
   proprio padre; fra fratelli viene prima il ramo nato prima (il primo commit
-  proprio piu' vecchio), senza guardare i nomi.
-- **Archi**: continui verso il padre certo, configurato o dedotto; tratteggiati
-  verso il padre **suggerito** di un caso ambiguo, da mostrare tratteggiato
-  finche' `[parents]` non dichiara il padre vero. Gli specchi non producono un
-  arco: sono lo stesso ramo.
-- **Nessun nome nelle scelte**: corsie e righe non cambiano se si rinominano i
-  riferimenti. Il test `invariance` confronta la disposizione in ogni
-  permutazione, insieme al resto del modello.
+  proprio piu' vecchio), senza guardare i nomi. Le famiglie che la visita in
+  profondita' non raggiunge (un ciclo di paternita', possibile solo in un
+  modello artificiale) ricevono comunque una corsia, in coda.
+- **Etichette remote**: un riferimento remoto la cui punta sta sulla catena dei
+  primi genitori del branch **locale con lo stesso nome** (in anticipo o in
+  ritardo) non ha una corsia propria: e' un'etichetta del locale e ne condivide
+  la corsia (`label_of` nel nodo). Un remoto senza locale resta un ramo normale.
+  In `origin/main` indietro di un commit, `origin/main` sta sulla corsia di
+  `main`; se invece e' in anticipo, i suoi commit sono suoi ma la corsia resta
+  quella di `main`. E' l'unico caso in cui due nodi con la stessa riga possono
+  stare in corsie diverse (l'etichetta e l'eventuale altro ramo sulla stessa
+  punta). Non c'e' ancora riuso delle corsie: la corsia liberata da
+  un'etichetta non viene riassegnata.
+- **Archi fra branch**: continui verso il padre certo, configurato o dedotto;
+  tratteggiati verso il padre **suggerito** di un caso ambiguo, da mostrare
+  tratteggiato finche' `[parents]` non dichiara il padre vero. Le etichette
+  remote e i riferimenti della stessa famiglia non producono un arco: sono lo
+  stesso ramo.
+- **Commit**: ogni commit ha una riga (la sua posizione topologica, la stessa
+  del dump) e una corsia: quella del ramo che lo possiede, oppure la corsia
+  anonima in coda se non lo possiede nessuno. Gli archi tra commit hanno un
+  tipo esplicito: **primo genitore** (la catena), **genitore di merge** (secondo
+  genitore e successivi) e **diramazione** (dal primo commit proprio di un ramo
+  al suo punto di fork). La catena dei primi genitori di un ramo resta sulla
+  sua corsia finche' il proprietario non cambia: il cambio e' il fork.
+- **Nessun nome nelle scelte**: corsie, righe e proprietari non cambiano se si
+  rinominano i riferimenti. Il test `invariance` confronta la disposizione
+  (branch e commit) in ogni permutazione, insieme al resto del modello.
 - **Solo numeri, nessuna finestra**: la fase 3 calcola le posizioni; il disegno
   con SDL3/SDL3_ttf resta alla fase successiva.
 
@@ -291,10 +320,10 @@ recente), piu' gli archi.
 
     ctest --test-dir build --output-on-failure
 
-Quindici test, nessuno con finestra:
+Tredici test, nessuno con finestra:
 
-1. `make_test_repo` genera il repository di prova (la fixture rimuove prima la
-   cartella dei repository di test, dentro la build);
+1. `make_test_repo` genera il repository di prova (la fixture rimuove prima il
+   solo percorso `<build>/test-repos/gitgraph_test_repo`);
 2. `core` verifica parsing, topologia, modello dei branch, alias, motivazioni
    (in particolare il padre suggerito e la motivazione che lo dichiara),
    override, long-lived, determinismo, quoting degli argomenti,
@@ -325,60 +354,58 @@ Quindici test, nessuno con finestra:
    motivazioni che non cominciano mai con un separatore "; " senza testo prima;
 4. `layout` verifica la disposizione del grafo (fase 3): un nodo per branch
    alla riga della sua punta, il tronco in corsia 0, i long-lived nelle prime
-   corsie secondo `[long-lived]`, i riferimenti sulla stessa punta (specchi,
-   alias) nella stessa corsia, archi continui verso il padre e tratteggiati
-   verso il suggerito (`branch1` -> `main`, `branch2` -> `branch1`), corsie
-   contigue 0..lanes-1 e determinismo. Le stesse regole sono ripetute su ogni
-   modello dalla proprieta' condivisa `gg_check_layout`;
+   corsie secondo `[long-lived]`, gli alias sulla stessa punta nella stessa
+   corsia, le **etichette remote** (`origin/main`, `upstream/main` sulla
+   corsia di `main`; `origin/branch1` etichetta di `branch1`), archi continui
+   verso il padre e tratteggiati verso il suggerito (`branch1` -> `main`,
+   `branch2` -> `branch1`), corsie contigue 0..lanes-1. Verifica inoltre la
+   **disposizione dei commit**: una cella per commit con riga e proprietario
+   attesi (`A`,`B`,`C` a `main`; `B1`..`B3` a `branch1`; `C1`,`C2` a
+   `branch2`; il merge a `main`), la catena dei primi genitori del tronco
+   sulla sua corsia, l'arco di merge verso il secondo genitore, l'arco di
+   diramazione, il commit `T1` (branch cancellato) nella corsia anonima in
+   coda e il determinismo (nodi, archi, commit). Su un repository sintetico
+   costruito dal test (main `A`,`B`,`C`; `branch1` `B1`,`B2`,`B3` da `B`;
+   `branch2` `C1`,`C2` da `B2`; merge `--no-ff`; `origin/main` in anticipo e
+   `upstream/main` in ritardo) confronta una **tabella scritta a mano**. Infine
+   un modello artificiale con un ciclo di paternita' verifica che le famiglie
+   che la visita in profondita' non raggiunge ricevano comunque una corsia. Le
+   stesse regole sono ripetute su ogni modello dalla proprieta' condivisa
+   `gg_check_layout`;
 5. `dump_smoke` esegue lo strumento di dump;
 6. `invariance` verifica che la genealogia non dipenda dall'ordine alfabetico:
    per ogni gruppo di branch con nidificazione o fratelli (nel repository di
    prova `branch1`/`branch2`, `branch1`/`sp`, `oA`/`oB`/`oC`,
    `amb1`/`amb2`/`ambbase`, `feature-x`/`rb`/`rm`) costruisce tutte le
    permutazioni dei nomi (fino a 6 per gruppo) e confronta stato, padre,
-   candidati, padre suggerito e disposizione (corsie, righe e archi) **per
-   punta di commit**; costruisce inoltre due
-   repository piccoli nella directory temporanea (nidificazione e tre rami dallo
-   stesso commit, anche con tutti i commit alla stessa ora, come nei repository
-   generati in blocco) e li rimuove alla fine. L'unica cosa che non viene
-   confrontata e' lo spareggio dichiarato sul nome a parita' di date: li' si
-   verifica la base dello spareggio, non la scelta. Per il caso di **due
+   candidati, padre suggerito e disposizione (corsie, righe, archi, **celle
+   dei commit e archi tra commit**) **per punta di commit**; costruisce inoltre
+   due repository piccoli nella directory temporanea (nidificazione e tre rami
+   dallo stesso commit, anche con tutti i commit alla stessa ora, come nei
+   repository generati in blocco) e li rimuove alla fine. L'unica cosa che non
+   viene confrontata e' lo spareggio dichiarato sul nome a parita' di date:
+   li' si verifica la base dello spareggio, non la scelta. Per il caso di **due
    candidati che hanno integrato lo stesso branch con un merge** costruisce un
    repository dedicato e confronta, oltre a tutte le permutazioni dei nomi,
    anche tre ordini diversi dell'array dei riferimenti (identita', invertito,
    ruotato): lo stato deve restare `ambiguo` senza padre, con entrambi i
-   candidati e la motivazione che dichiara il merge;
+   candidati e la motivazione che dichiara il merge. Il test verifica anche che
+   il grafo dei padri suggeriti non contenga cicli in nessuna permutazione, e
+   costruisce i quattro casi di riproduzione mk3 (due rami nati dallo stesso
+   punto, modalita' A e B con i nomi in entrambi gli ordini): tutti devono
+   risultare `ambigui` con l'altro come unico candidato e un solo padre
+   suggerito per data;
 7. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
-   3 s;
+   3 s; il test stampa il numero di corsie rispetto ai rami (senza remoti nel
+   generatore sono uguali) e verifica che non ci sia una corsia anonima;
 8. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
    30 s (determinismo verificato anche sul repository grande);
 9. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
    15 s, con ogni branch nato dal precedente (catena profonda): verifica il
    controllo delle relazioni circolari e l'ordinamento dei padri;
-10. `invariance` verifica anche che il grafo dei padri suggeriti non contenga
-    cicli in nessuna permutazione, e costruisce i quattro casi di riproduzione
-    mk3 (due rami nati dallo stesso punto, modalita' A e B con i nomi in
-    entrambi gli ordini): tutti devono risultare `ambigui` con l'altro come
-    unico candidato e un solo padre suggerito per data;
-11. `encoding` verifica che i file di testo siano UTF-8 validi e senza mojibake
-    (script CMake, senza compilare). Il validatore e' in
-    `tests/utf8_check.cmake`; la coda del file e' controllata davvero: una
-    sequenza incompleta o un byte non valido negli ultimi 1-3 byte viene
-    rifiutato, perche' sull'ultimo pezzo non esiste un pezzo successivo che
-    possa completarla;
-12. `utf8` prova lo stesso validatore su sequenze scelte (script CMake, senza
-    compilare): sequenze valide di 1-4 byte compresi i limiti, overlong,
-    surrogate, punte oltre U+10FFFF, lead proibiti, continuazioni orfane, lead
-    incompleti, residui negli ultimi 1-3 byte del file (anche su file piu'
-    lunghi di un pezzo) e sequenze a cavallo del confine fra i pezzi;
-13. `cleanup_guard` verifica la protezione della pulizia (script CMake, senza
-    compilare): i percorsi esterni alla build, quelli che la scavalcano con
-    `..`, quelli che attraversano una junction e la radice di un drive come
-    directory di build devono essere rifiutati, una junction interna alla build
-    invece accettata; inoltre i due script di generazione devono rifiutare un
-    `GG_*_REPO` esterno **prima** di cancellare o scrivere qualsiasi cosa. Le
-    directory "esterne" del test sono finte e stanno dentro la build: un
-    difetto del controllo non puo' cancellare dati veri.
+10. `encoding` verifica che i file in `src/` e `tests/` siano **ASCII**: fallisce
+    se un file contiene un byte oltre `0x7F` (quindi anche i byte `C3 82` /
+    `C3 83` del mojibake). Script CMake puro, senza compilare.
 
 I repository di scala sono sintetici e deterministici: `tests/make_scale_repo.c`
 genera su stdout uno stream per `git fast-import` (commit su `main`, un
@@ -404,21 +431,12 @@ Lo script `make_test_repo.bat` crea il repository e **non cancella mai nulla**:
 se la directory di destinazione non esiste o e' vuota la usa, altrimenti esce
 con errore. La pulizia prima di ogni esecuzione la fa CMake
 (`tests/make_test_repo_fixture.cmake`), che rimuove con `file(REMOVE_RECURSE ...)`
-la sola cartella del repository di prova, dentro la cartella dei repository di
-test nella directory di build (`build/test_repos/gitgraph_test_repo` per
-configurazione predefinita). I percorsi di pulizia
-(`GG_TEST_REPO`, `GG_SCALE_REPO`) non sono variabili di cache - un `-D` non
-puo' spostarli - e prima di ogni cancellazione `tests/cleanup_guard.cmake`
-verifica che stiano **dentro la directory di build**, sia nel percorso scritto
-sia nel percorso reale: un componente che e' una junction (o un symlink) puo'
-portare fuori, e il confronto lessicale del prefisso non lo vede; il controllo
-risolve il piu' profondo antenato esistente, quindi vale anche quando la
-cartella da creare non esiste ancora. Se la verifica fallisce non viene
-cancellato ne' scritto nulla (la fixture verifica anche che il repository stia
-dentro la cartella dei test, con i percorsi reali). Il test `cleanup_guard`
-prova il controllo e questo rifiuto, senza toccare dati veri. Non servono piu'
-marcatori, controlli sui collegamenti ne' file sentinella: sono costi che
-diventano inutili quando a cancellare e' solo CMake, con un percorso noto.
+il solo percorso `<build>/test-repos/gitgraph_test_repo` (scritto in
+`CMakeLists.txt`). Anche i repository di scala stanno sotto `<build>/test-repos/`
+e la loro pulizia cancella solo il percorso indicato. Non c'e' nessun controllo
+di giunzioni: si cancella solo una cartella di test dentro la directory di
+build, con un percorso noto, e CMake non segue i collegamenti in
+`REMOVE_RECURSE`.
 
 I percorsi possono contenere spazi e caratteri che `cmd.exe` tratta in modo
 speciale (`&` e' un separatore di comandi): i percorsi arrivano tramite variabili

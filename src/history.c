@@ -1557,6 +1557,173 @@ static void assign_family(Ctx *ctx, size_t fi)
     deduction_free(&d);
 }
 
+/* ---------- proprietario dei commit ---------- */
+
+/* Ordine di reclamo delle famiglie: i tronchi per primi (nell'ordine di
+ * [long-lived]), poi un padre prima dei figli; fra fratelli prima il ramo
+ * nato prima (primo commit proprio piu' vecchio, cioe' posizione maggiore nel
+ * log). Chiavi solo strutturali: i nomi non entrano. */
+static const Ctx *g_owner_ctx;
+
+static size_t owner_birth(const Family *f)
+{
+    return f->first_own != NO_POS ? f->first_own : f->tip_idx;
+}
+
+static int cmp_claim_order(const void *pa, const void *pb)
+{
+    size_t a = *(const size_t *)pa;
+    size_t b = *(const size_t *)pb;
+    const Family *fa = &g_owner_ctx->families[a];
+    const Family *fb = &g_owner_ctx->families[b];
+    if (fa->trunk != fb->trunk)
+        return fa->trunk ? -1 : 1;
+    if (fa->trunk && fa->ll_rank != fb->ll_rank)
+        return fa->ll_rank < fb->ll_rank ? -1 : 1;
+    size_t ba = owner_birth(fa);
+    size_t bb = owner_birth(fb);
+    if (ba != bb)
+        return ba > bb ? -1 : 1; /* posizione maggiore = ramo piu' vecchio */
+    if (fa->rep_node != fb->rep_node)
+        return fa->rep_node < fb->rep_node ? -1 : 1;
+    return 0;
+}
+
+/* Famiglia padre di `f`: il primo membro con un padre esterno alla famiglia,
+ * altrimenti (caso ambiguo) il primo col padre suggerito. NO_POS se radice. */
+static size_t family_parent_family(const Ctx *ctx, size_t f)
+{
+    const Family *fam = &ctx->families[f];
+    for (size_t k = 0; k < fam->node_count; k++) {
+        const BranchNode *m = node_at(ctx, fam->nodes[k]);
+        if (!m->parent)
+            continue;
+        size_t j = history_find_branch(ctx->out, m->parent);
+        if (j != NO_POS && ctx->node_family[j] != f)
+            return ctx->node_family[j];
+    }
+    for (size_t k = 0; k < fam->node_count; k++) {
+        const BranchNode *m = node_at(ctx, fam->nodes[k]);
+        if (m->state != PARENT_AMBIGUOUS || !m->suggested_parent)
+            continue;
+        size_t j = history_find_branch(ctx->out, m->suggested_parent);
+        if (j != NO_POS && ctx->node_family[j] != f)
+            return ctx->node_family[j];
+    }
+    return NO_POS;
+}
+
+/* Un ramo reclama la propria catena dei primi genitori fino al primo commit
+ * gia' assegnato (o alla fine della catena). */
+static void claim_chain(Ctx *ctx, size_t f)
+{
+    const Family *fam = &ctx->families[f];
+    if (fam->tip_idx == NO_POS)
+        return;
+    size_t owner = fam->rep_node;
+    for (size_t cur = fam->tip_idx; cur != NO_POS; cur = first_parent(ctx, cur)) {
+        if (cur >= ctx->d->commit_count)
+            break;
+        if (ctx->out->commit_owner[cur] != NO_POS)
+            break;
+        ctx->out->commit_owner[cur] = owner;
+    }
+}
+
+/* Visita in profondita' dal seme `f`: reclama ogni famiglia non ancora vista
+ * che raggiunge, rispettando l'ordine padre-prima-dei-figli. */
+static void claim_from(Ctx *ctx, size_t f, uint8_t *done, size_t *stack,
+                       const size_t *start, const size_t *items)
+{
+    size_t sp = 0;
+    stack[sp++] = f;
+    while (sp > 0) {
+        size_t g = stack[--sp];
+        if (done[g])
+            continue;
+        done[g] = 1;
+        claim_chain(ctx, g);
+        for (size_t k = start[g + 1]; k-- > start[g];)
+            stack[sp++] = items[k];
+    }
+}
+
+static void compute_owners(Ctx *ctx)
+{
+    History *out = ctx->out;
+    size_t fc = ctx->family_count;
+    size_t cc = ctx->d->commit_count;
+
+    out->commit_owner = xmalloc((cc ? cc : 1) * sizeof(size_t));
+    for (size_t i = 0; i < cc; i++)
+        out->commit_owner[i] = NO_POS;
+    if (fc == 0)
+        return;
+
+    /* grafo delle famiglie: padre e liste dei figli contigue */
+    size_t *parent = xmalloc(fc * sizeof(size_t));
+    size_t *child_count = xcalloc(fc, sizeof(size_t));
+    size_t *roots = xmalloc(fc * sizeof(size_t));
+    size_t root_count = 0;
+    for (size_t f = 0; f < fc; f++) {
+        parent[f] = family_parent_family(ctx, f);
+        if (parent[f] == NO_POS)
+            roots[root_count++] = f;
+        else
+            child_count[parent[f]]++;
+    }
+    size_t *start = xmalloc((fc + 1) * sizeof(size_t));
+    start[0] = 0;
+    for (size_t f = 0; f < fc; f++)
+        start[f + 1] = start[f] + child_count[f];
+    size_t *items = xmalloc((fc ? fc : 1) * sizeof(size_t));
+    size_t *cur = xmalloc(fc * sizeof(size_t));
+    memcpy(cur, start, fc * sizeof(size_t));
+    for (size_t f = 0; f < fc; f++)
+        if (parent[f] != NO_POS)
+            items[cur[parent[f]]++] = f;
+    free(cur);
+    free(child_count);
+
+    g_owner_ctx = ctx;
+    qsort(roots, root_count, sizeof(size_t), cmp_claim_order);
+    for (size_t f = 0; f < fc; f++)
+        qsort(items + start[f], start[f + 1] - start[f], sizeof(size_t),
+              cmp_claim_order);
+
+    /* 1. i tronchi reclamano per primi, nell'ordine di [long-lived], anche
+     *    prima degli eventuali discendenti di un altro tronco. Non vengono
+     *    marcati "visti": la visita deve comunque scendere ai loro figli (la
+     *    seconda reclamata e' un no-op). */
+    for (size_t k = 0; k < root_count; k++)
+        if (ctx->families[roots[k]].trunk)
+            claim_chain(ctx, roots[k]);
+
+    /* 2. visita in profondita' dalle radici: un padre prima dei figli */
+    uint8_t *done = xcalloc(fc, 1);
+    size_t *stack = xmalloc(fc * sizeof(size_t));
+    for (size_t k = 0; k < root_count; k++)
+        claim_from(ctx, roots[k], done, stack, start, items);
+
+    /* 3. famiglie che le radici non raggiungono (un ciclo di paternita',
+     *    possibile solo in un modello artificiale): visita da ciascuna, in
+     *    ordine deterministico, cosi' nessun commit resta senza proprietario. */
+    size_t *all = xmalloc(fc * sizeof(size_t));
+    for (size_t f = 0; f < fc; f++)
+        all[f] = f;
+    qsort(all, fc, sizeof(size_t), cmp_claim_order);
+    for (size_t k = 0; k < fc; k++)
+        claim_from(ctx, all[k], done, stack, start, items);
+
+    free(parent);
+    free(roots);
+    free(start);
+    free(items);
+    free(stack);
+    free(done);
+    free(all);
+}
+
 /* ---------- API pubblica ---------- */
 
 size_t history_find_branch(const History *h, const char *name)
@@ -1688,6 +1855,7 @@ bool history_build(History *out, const GitData *data, const GraphConfig *cfg,
             assign_family(&ctx, ctx.family_order[oi]);
 
         break_parent_cycles(out, ctx.name_map);
+        compute_owners(&ctx);
     }
 
     strmap_free(ctx.name_map);
@@ -1733,5 +1901,6 @@ void history_free(History *h)
         free(n->candidates);
     }
     free(h->branches);
+    free(h->commit_owner);
     memset(h, 0, sizeof *h);
 }

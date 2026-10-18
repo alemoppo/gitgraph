@@ -1,11 +1,13 @@
 /* dump_main.c - strumento di ispezione testuale.
  *
- * Uso: gitgraph_dump [--full] [--help] [percorso-repo]
- *   --full   stampa i messaggi di commit completi
+ * Uso: gitgraph_dump [--full] [--layout] [--help] [percorso-repo]
+ *   --full    stampa i messaggi di commit completi
+ *   --layout  stampa solo la tabella dei commit (riga, corsia, proprietario)
+ *             e gli archi tra commit
  *
- * Stampa commit, riferimenti, modello dei branch (padre, stato, motivo) e la
- * disposizione del grafo (corsie, righe, archi). Nessuna finestra grafica:
- * serve ai test e alla verifica manuale.
+ * Senza --layout stampa commit, riferimenti, modello dei branch (padre, stato,
+ * motivo) e la disposizione del grafo (corsie, righe, archi). Nessuna finestra
+ * grafica: serve ai test e alla verifica manuale.
  */
 #include "util.h"
 #include "config.h"
@@ -62,6 +64,18 @@ static const char *kind_name(RefKind k)
     }
 }
 
+static const char *cedge_kind_name(LayoutCommitEdgeKind k)
+{
+    switch (k) {
+    case LAYOUT_CEDGE_FIRST_PARENT:
+        return "primo genitore";
+    case LAYOUT_CEDGE_MERGE_PARENT:
+        return "genitore di merge";
+    default:
+        return "diramazione";
+    }
+}
+
 /* Prima riga del messaggio, ripulita. */
 static void subject_line(const char *message, char *out, size_t out_size)
 {
@@ -75,9 +89,42 @@ static void subject_line(const char *message, char *out, size_t out_size)
 
 static void print_help(void)
 {
-    printf("uso: gitgraph_dump [--full] [--help] [percorso-repo]\n"
-           "  --full   stampa i messaggi di commit completi\n"
+    printf("uso: gitgraph_dump [--full] [--layout] [--help] [percorso-repo]\n"
+           "  --full     stampa i messaggi di commit completi\n"
+           "  --layout   stampa la tabella dei commit (riga, corsia,\n"
+           "             proprietario) e gli archi tra commit\n"
            "  percorso-repo  default: directory corrente\n");
+}
+
+/* Tabella dei commit: riga (posizione topologica), corsia del proprietario e
+ * proprietario; i commit senza proprietario stanno nella corsia anonima. */
+static void print_commit_layout(const GitData *data, const History *hist,
+                                const Layout *lay)
+{
+    printf("\nCOMMIT LAYOUT (riga, corsia, proprietario)\n");
+    printf("  %4s  %6s  %-9s  %s\n", "riga", "corsia", "commit", "proprietario");
+    for (size_t ci = 0; ci < lay->commit_count; ci++) {
+        const LayoutCommit *cell = &lay->commits[ci];
+        char sh[16];
+        gitdata_short_hash(data->commits[ci].hash, 8, sh);
+        if (cell->owner == (size_t)-1)
+            printf("  %4zu  %6zu  %-9s  -\n", cell->row, cell->lane, sh);
+        else
+            printf("  %4zu  %6zu  %-9s  %s\n", cell->row, cell->lane, sh,
+                   hist->branches[cell->owner].name);
+    }
+    printf("\nARCHI DEI COMMIT (figlio -> genitore; tipo)\n");
+    for (size_t e = 0; e < lay->cedge_count; e++) {
+        const LayoutCommitEdge *ce = &lay->cedges[e];
+        char a[16], b[16];
+        gitdata_short_hash(data->commits[ce->from].hash, 8, a);
+        gitdata_short_hash(data->commits[ce->to].hash, 8, b);
+        printf("  %s -> %s  %s\n", a, b, cedge_kind_name(ce->kind));
+    }
+    printf("\nlayout: %zu commit, %zu corsie", lay->commit_count, lay->lanes);
+    if (lay->anon_lane != (size_t)-1)
+        printf(" (anonima: %zu)", lay->anon_lane);
+    printf(", %zu archi tra commit\n", lay->cedge_count);
 }
 
 int main(int argc, char **argv)
@@ -87,9 +134,12 @@ int main(int argc, char **argv)
 #endif
     const char *repo = NULL;
     bool full = false;
+    bool layout_only = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--full") == 0)
             full = true;
+        else if (strcmp(argv[i], "--layout") == 0)
+            layout_only = true;
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_help();
             return 0;
@@ -160,6 +210,19 @@ int main(int argc, char **argv)
         else
             printf("branch corrente: (HEAD scollegata)\n");
         printf("commit: %zu  riferimenti: %zu\n", data.commit_count, data.ref_count);
+
+        Layout lay;
+        layout_build(&lay, &hist);
+
+        if (layout_only) {
+            print_commit_layout(&data, &hist, &lay);
+            layout_free(&lay);
+            history_free(&hist);
+            config_free(&cfg);
+            gitdata_free(&data);
+            return 0;
+        }
+
         if (cfg.long_lived_count > 0) {
             printf("long-lived (ordine di gerarchia):");
             for (size_t i = 0; i < cfg.long_lived_count; i++)
@@ -287,18 +350,19 @@ int main(int argc, char **argv)
         }
 
         /* disposizione del grafo (fase 3): corsie e righe dei nodi, archi */
-        Layout lay;
-        layout_build(&lay, &hist);
         printf("\nLAYOUT (branch: corsia, riga; corsia 0 = piu' a sinistra, "
                "riga 0 = commit piu' recente)\n");
         for (size_t i = 0; i < hist.branch_count; i++) {
             const LayoutNode *nd = &lay.nodes[i];
             if (nd->row == (size_t)-1)
-                printf("  %-20s corsia %4zu  riga    -\n", hist.branches[i].name,
+                printf("  %-20s corsia %4zu  riga    -", hist.branches[i].name,
                        nd->lane);
             else
-                printf("  %-20s corsia %4zu  riga %4zu\n", hist.branches[i].name,
+                printf("  %-20s corsia %4zu  riga %4zu", hist.branches[i].name,
                        nd->lane, nd->row);
+            if (nd->label_of != (size_t)-1)
+                printf("  (etichetta di %s)", hist.branches[nd->label_of].name);
+            printf("\n");
         }
         printf("\nARCHI (figlio -> padre; tratteggiato = padre suggerito)\n");
         for (size_t e = 0; e < lay.edge_count; e++) {
@@ -308,8 +372,10 @@ int main(int argc, char **argv)
                    lay.edges[e].kind == LAYOUT_EDGE_SUGGESTED ? "tratteggiato"
                                                               : "continuo");
         }
-        printf("\nlayout: %zu corsie, %zu righe, %zu archi\n", lay.lanes, lay.rows,
-               lay.edge_count);
+        printf("\nlayout: %zu corsie, %zu righe, %zu archi (%zu commit, %zu archi "
+               "tra commit)\n",
+               lay.lanes, lay.rows, lay.edge_count, lay.commit_count,
+               lay.cedge_count);
         layout_free(&lay);
 
         history_free(&hist);

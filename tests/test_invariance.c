@@ -173,7 +173,8 @@ static char *describe(const History *h, const GitData *d)
 static char *describe_layout(const History *h, const GitData *d, const Layout *l)
 {
     size_t n = h->branch_count;
-    char **lines = (char **)calloc(n ? n : 1, sizeof(char *));
+    char **lines = (char **)calloc(n + l->commit_count + l->cedge_count + 1,
+                                   sizeof(char *));
     size_t count = 0;
     char a[32], b[32];
 
@@ -228,6 +229,32 @@ static char *describe_layout(const History *h, const GitData *d, const Layout *l
             free(tags[k]);
         free(tags);
         sb_append(&sb, "]");
+        lines[count++] = sb.data ? sb.data : xstrdup("");
+    }
+
+    /* commit: riga, corsia e proprietario (per punta di commit), con gli archi
+     * tra commit; anche qui i nomi non devono entrare nel confronto */
+    for (size_t ci = 0; ci < l->commit_count; ci++) {
+        const LayoutCommit *cell = &l->commits[ci];
+        const char *owner = "-";
+        if (cell->owner != NO_TIP && cell->owner < h->branch_count) {
+            size_t otip = gitdata_find_commit(
+                d, d->refs[h->branches[cell->owner].ref_index].target);
+            owner = tip_tag(d, otip, b, sizeof b);
+        }
+        StrBuf sb;
+        sb_init(&sb);
+        sb_appendf(&sb, "commit %s riga=%zu corsia=%zu proprietario=%s",
+                   tip_tag(d, ci, a, sizeof a), cell->row, cell->lane, owner);
+        lines[count++] = sb.data ? sb.data : xstrdup("");
+    }
+    for (size_t e = 0; e < l->cedge_count; e++) {
+        const LayoutCommitEdge *ce = &l->cedges[e];
+        StrBuf sb;
+        sb_init(&sb);
+        sb_appendf(&sb, "arco tra commit %s -> %s tipo=%d",
+                   tip_tag(d, ce->from, a, sizeof a),
+                   tip_tag(d, ce->to, b, sizeof b), (int)ce->kind);
         lines[count++] = sb.data ? sb.data : xstrdup("");
     }
     qsort(lines, count, sizeof(char *), cmp_line);

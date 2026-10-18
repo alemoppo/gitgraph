@@ -257,6 +257,17 @@ int main(int argc, char **argv)
         Layout lay;
         layout_build(&lay, &h1);
         gg_check_layout(&lay, &h1, "repo di scala");
+        /* corsie rispetto ai rami: il generatore non crea remoti, quindi ogni
+         * ramo e' una famiglia con la sua corsia (nessuna etichetta, nessuna
+         * corsia anonima: nessun commit e' orfano) */
+        printf("corsie: %zu per %zu rami (%zu commit, %zu archi tra commit)\n",
+               lay.lanes, h1.branch_count, lay.commit_count, lay.cedge_count);
+        CHECK(lay.lanes == (size_t)h1.branch_count,
+              "%zu corsie per %zu rami (nessun remoto nel generatore: attese "
+              "pari)",
+              lay.lanes, h1.branch_count);
+        CHECK(lay.anon_lane == (size_t)-1,
+              "il repo di scala non ha commit senza proprietario");
         layout_free(&lay);
     }
     CHECK(t_load + t_build <= budget,

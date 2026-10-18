@@ -18,13 +18,28 @@
  *   - LAYOUT_EDGE_SUGGESTED (tratteggiato): padre suggerito di un caso
  *     ambiguo, cioe' una ipotesi da mostrare tratteggiata finche' [parents]
  *     non dichiara il padre vero.
- * Gli specchi (remote-tracking che punta allo stesso commit di un branch
- * locale) sono nella stessa famiglia del locale, quindi nella stessa corsia:
- * non producono un arco.
  *
  * FAMIGLIE. I riferimenti con la stessa punta sono la stessa famiglia (stessa
- * genealogia, stessa corsia): gli alias e gli specchi condividono la
- * posizione, cosi' il disegno non li sovrappone in corsie diverse.
+ * genealogia, stessa corsia): gli alias condividono la posizione, cosi' il
+ * disegno non li sovrappone in corsie diverse.
+ *
+ * ETICHETTE REMOTE. Un riferimento remoto la cui punta sta sulla catena dei
+ * primi genitori del branch locale con lo stesso nome (in anticipo o in
+ * ritardo) non ha una corsia propria: e' un'etichetta del locale e ne
+ * condivide la corsia (label_of). Un remoto senza locale resta un ramo
+ * normale. La corsia del remoto puo' quindi differire da quella degli altri
+ * riferimenti sulla stessa punta: e' l'unico caso in cui due nodi con la
+ * stessa riga non stanno nella stessa corsia.
+ *
+ * COMMIT. Oltre ai nodi-branch, la disposizione assegna una RIGA e una CORSIA
+ * a ogni commit del log: la riga e' la sua posizione topologica, la corsia e'
+ * quella del ramo proprietario (History.commit_owner); i commit che nessun
+ * ramo reclama (catena di un ramo sparito) finiscono nella corsia anonima,
+ * in coda a tutte le altre. Gli archi tra commit sono di tre tipi:
+ *   - LAYOUT_CEDGE_FIRST_PARENT (catena dei primi genitori);
+ *   - LAYOUT_CEDGE_MERGE_PARENT (secondo genitore e successivi di un merge);
+ *   - LAYOUT_CEDGE_BRANCH (diramazione: dal primo commit proprio di un ramo
+ *     al suo punto di diramazione).
  *
  * INVARIANZA PER RINOMINA. La disposizione non dipende dai nomi: gli
  * ordinamenti usano solo la struttura (posizioni nel log, ordine di
@@ -47,9 +62,11 @@ typedef enum {
 } LayoutEdgeKind;
 
 typedef struct {
-    size_t branch; /* indice in History.branches */
-    size_t row;    /* riga (posizione topologica della punta), SIZE_MAX se fuori dal log */
-    size_t lane;   /* corsia (0 = la piu' a sinistra) */
+    size_t branch;   /* indice in History.branches */
+    size_t row;      /* riga (posizione topologica della punta), SIZE_MAX se fuori dal log */
+    size_t lane;     /* corsia (0 = la piu' a sinistra) */
+    size_t label_of; /* remoto etichetta di un locale: indice del locale,
+                        SIZE_MAX se ha una corsia propria */
 } LayoutNode;
 
 typedef struct {
@@ -58,13 +75,39 @@ typedef struct {
     LayoutEdgeKind kind;
 } LayoutEdge;
 
+typedef enum {
+    LAYOUT_CEDGE_FIRST_PARENT, /* catena dei primi genitori */
+    LAYOUT_CEDGE_MERGE_PARENT, /* secondo genitore (o successivo) di un merge */
+    LAYOUT_CEDGE_BRANCH        /* diramazione: primo commit proprio -> fork */
+} LayoutCommitEdgeKind;
+
+typedef struct {
+    size_t commit; /* indice in GitData.commits */
+    size_t row;    /* riga (posizione topologica, 0 = piu' recente) */
+    size_t lane;   /* corsia del proprietario, o quella anonima in coda */
+    size_t owner;  /* indice del BranchNode proprietario, SIZE_MAX se anonimo */
+} LayoutCommit;
+
+typedef struct {
+    size_t from; /* commit di partenza (il figlio) */
+    size_t to;   /* commit di arrivo (genitore, o punto di diramazione) */
+    LayoutCommitEdgeKind kind;
+} LayoutCommitEdge;
+
 typedef struct {
     LayoutNode *nodes; /* uno per ogni branch, nello stesso ordine */
     size_t node_count;
     LayoutEdge *edges;
     size_t edge_count;
     size_t rows;  /* numero di righe disponibili (commit del log) */
-    size_t lanes; /* numero di corsie usate */
+
+    LayoutCommit *commits; /* uno per ogni commit, indice = riga */
+    size_t commit_count;
+    LayoutCommitEdge *cedges;
+    size_t cedge_count;
+    size_t anon_lane; /* corsia dei commit senza proprietario, SIZE_MAX se nessuno */
+
+    size_t lanes; /* numero di corsie usate (branch e commit) */
 } Layout;
 
 /* Costruisce la disposizione dal modello dei branch. Azzera `out` e ne prende

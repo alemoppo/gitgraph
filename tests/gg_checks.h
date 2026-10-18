@@ -112,11 +112,15 @@ static void gg_check_trunk_ancestry(const History *h, const GitData *d,
  *  - un nodo per branch, nella stessa riga della punta (o primo commit
  *    proprio se la punta e' fuori dal log);
  *  - corsia dentro [0, lanes); i riferimenti sulla stessa punta (stessa
- *    famiglia) condividono riga e corsia;
+ *    famiglia) condividono riga e corsia, tranne un'etichetta remota che sta
+ *    sulla corsia del locale che etichetta (label_of);
  *  - ogni branch ha al piu' un arco uscente: continuo verso il padre se il
  *    padre e' un altro ramo, tratteggiato verso il suggerito se il caso e'
  *    ambiguo, nessuno altrimenti (gli specchi sono lo stesso ramo);
- *  - il grafo degli archi non ha cicli. */
+ *  - il grafo degli archi non ha cicli;
+ *  - ogni commit ha una cella (riga = posizione topologica, corsia del
+ *    proprietario o quella anonima) e gli archi tra commit sono di primo
+ *    genitore, di merge e di diramazione, coerenti col grafo reale. */
 static void gg_check_layout(const Layout *l, const History *h, const char *etichetta)
 {
     size_t bc = h->branch_count;
@@ -141,13 +145,28 @@ static void gg_check_layout(const Layout *l, const History *h, const char *etich
         CHECK(l->lanes == 0 || nd->lane < l->lanes,
               "%s: '%s' corsia %zu fuori da %zu", etichetta, b->name, nd->lane,
               l->lanes);
-        /* stessa punta = stessa famiglia = stessa posizione */
+        /* un'etichetta remota condivide la corsia del locale che etichetta */
+        if (nd->label_of != (size_t)-1) {
+            CHECK(nd->label_of < bc, "%s: '%s' etichetta del branch %zu inesistente",
+                  etichetta, b->name, nd->label_of);
+            if (nd->label_of < bc)
+                CHECK(l->nodes[nd->label_of].lane == nd->lane,
+                      "%s: '%s' etichetta di '%s' ma in corsia %zu invece di %zu",
+                      etichetta, b->name, h->branches[nd->label_of].name,
+                      nd->lane, l->nodes[nd->label_of].lane);
+        }
+        /* stessa punta = stessa riga; la stessa corsia vale per tutti tranne
+         * un'etichetta remota, che sta sulla corsia del locale etichettato */
         for (size_t k = 0; k < i; k++) {
-            if (b->tip_pos != (size_t)-1 && h->branches[k].tip_pos == b->tip_pos)
-                CHECK(l->nodes[k].lane == nd->lane &&
-                          l->nodes[k].row == nd->row,
-                      "%s: '%s' e '%s' (stessa punta) in posizioni diverse",
+            if (b->tip_pos != (size_t)-1 && h->branches[k].tip_pos == b->tip_pos) {
+                CHECK(l->nodes[k].row == nd->row,
+                      "%s: '%s' e '%s' (stessa punta) in righe diverse",
                       etichetta, b->name, h->branches[k].name);
+                if (nd->label_of == (size_t)-1 && l->nodes[k].label_of == (size_t)-1)
+                    CHECK(l->nodes[k].lane == nd->lane,
+                          "%s: '%s' e '%s' (stessa punta) in corsie diverse",
+                          etichetta, b->name, h->branches[k].name);
+            }
         }
     }
 
@@ -189,9 +208,12 @@ static void gg_check_layout(const Layout *l, const History *h, const char *etich
             continue;
         }
         size_t j = history_find_branch(h, want);
-        bool stesso_ramo = (j != (size_t)-1 && j != i &&
-                            b->tip_pos != (size_t)-1 &&
-                            h->branches[j].tip_pos == b->tip_pos);
+        /* stesso ramo = stessa famiglia: stessa punta, oppure (etichetta
+         * remota) la stessa corsia del locale etichettato */
+        bool stesso_ramo =
+            (j != (size_t)-1 && j != i &&
+             ((b->tip_pos != (size_t)-1 && h->branches[j].tip_pos == b->tip_pos) ||
+              l->nodes[i].lane == l->nodes[j].lane));
         if (j == (size_t)-1 || j == i || stesso_ramo)
             CHECK(out == 0, "%s: '%s' arco verso un padre che e' lo stesso ramo",
                   etichetta, b->name);
@@ -214,6 +236,116 @@ static void gg_check_layout(const Layout *l, const History *h, const char *etich
               etichetta, i);
     }
     free(par);
+
+    /* COMMIT: una cella per commit, riga = posizione topologica, corsia del
+     * proprietario (o quella anonima in coda); gli archi tra commit hanno i
+     * tre tipi dichiarati e sono coerenti col grafo reale. */
+    const GitData *d = h->data;
+    CHECK(l->commit_count == d->commit_count,
+          "%s: layout con %zu commit per %zu nel log", etichetta,
+          l->commit_count, d->commit_count);
+    size_t fp_attesi = 0, mp_attesi = 0;
+    for (size_t ci = 0; ci < d->commit_count; ci++) {
+        const GitCommit *gc = &d->commits[ci];
+        for (size_t k = 0; k < gc->parent_count; k++) {
+            if (gc->parent_idx[k] == (size_t)-1)
+                continue;
+            if (k == 0)
+                fp_attesi++;
+            else
+                mp_attesi++;
+        }
+    }
+    size_t fp = 0, mp = 0;
+    for (size_t ci = 0; ci < l->commit_count && ci < d->commit_count; ci++) {
+        const LayoutCommit *cell = &l->commits[ci];
+        CHECK(cell->commit == ci,
+              "%s: cella %zu riferisce il commit %zu", etichetta, ci, cell->commit);
+        CHECK(cell->row == ci, "%s: commit %zu alla riga %zu, attesa %zu",
+              etichetta, ci, cell->row, ci);
+        CHECK(l->lanes == 0 || cell->lane < l->lanes,
+              "%s: commit %zu in corsia %zu fuori da %zu", etichetta, ci,
+              cell->lane, l->lanes);
+        if (h->commit_owner)
+            CHECK(cell->owner == h->commit_owner[ci],
+                  "%s: commit %zu proprietario %zu, atteso %zu", etichetta, ci,
+                  cell->owner, h->commit_owner[ci]);
+        if (cell->owner == (size_t)-1) {
+            CHECK(l->anon_lane != (size_t)-1 && cell->lane == l->anon_lane,
+                  "%s: commit %zu senza proprietario ma fuori dalla corsia "
+                  "anonima", etichetta, ci);
+        } else {
+            CHECK(cell->owner < bc, "%s: commit %zu proprietario %zu inesistente",
+                  etichetta, ci, cell->owner);
+            if (cell->owner < bc)
+                CHECK(l->nodes[cell->owner].lane == cell->lane,
+                      "%s: commit %zu in corsia %zu ma il proprietario '%s' in "
+                      "%zu", etichetta, ci, cell->lane,
+                      h->branches[cell->owner].name, l->nodes[cell->owner].lane);
+        }
+        /* la catena dei primi genitori resta sulla stessa corsia finche' il
+         * proprietario non cambia (il cambio e' il punto di diramazione) */
+        if (cell->owner != (size_t)-1 && d->commits[ci].parent_count > 0) {
+            size_t p = d->commits[ci].parent_idx[0];
+            if (p != (size_t)-1 && p < d->commit_count &&
+                l->commits[p].owner == cell->owner)
+                CHECK(l->commits[p].lane == cell->lane,
+                      "%s: commit %zu e primo genitore %zu con lo stesso "
+                      "proprietario ma corsie %zu e %zu", etichetta, ci, p,
+                      cell->lane, l->commits[p].lane);
+        }
+    }
+    for (size_t ei = 0; ei < l->cedge_count; ei++) {
+        const LayoutCommitEdge *ce = &l->cedges[ei];
+        CHECK(ce->from < d->commit_count && ce->to < d->commit_count,
+              "%s: arco tra commit fuori dal log (%zu -> %zu)", etichetta,
+              ce->from, ce->to);
+        if (ce->from >= d->commit_count || ce->to >= d->commit_count)
+            continue;
+        const GitCommit *gc = &d->commits[ce->from];
+        if (ce->kind == LAYOUT_CEDGE_FIRST_PARENT) {
+            fp++;
+            CHECK(gc->parent_count > 0 && gc->parent_idx[0] == ce->to,
+                  "%s: arco di primo genitore %zu -> %zu non e' il primo "
+                  "genitore", etichetta, ce->from, ce->to);
+        } else if (ce->kind == LAYOUT_CEDGE_MERGE_PARENT) {
+            mp++;
+            bool trovato = false;
+            for (size_t k = 1; k < gc->parent_count && !trovato; k++)
+                if (gc->parent_idx[k] == ce->to)
+                    trovato = true;
+            CHECK(trovato, "%s: arco di merge %zu -> %zu non e' un secondo "
+                           "genitore", etichetta, ce->from, ce->to);
+        } else {
+            bool trovato = false;
+            for (size_t i = 0; i < bc && !trovato; i++)
+                if (l->nodes[i].label_of == (size_t)-1 &&
+                    h->branches[i].first_own_pos == ce->from &&
+                    h->branches[i].fork_pos == ce->to)
+                    trovato = true;
+            CHECK(trovato, "%s: arco di diramazione %zu -> %zu senza ramo "
+                           "corrispondente", etichetta, ce->from, ce->to);
+        }
+    }
+    CHECK(fp == fp_attesi, "%s: %zu archi di primo genitore, attesi %zu",
+          etichetta, fp, fp_attesi);
+    CHECK(mp == mp_attesi, "%s: %zu archi di merge, attesi %zu", etichetta, mp,
+          mp_attesi);
+    for (size_t i = 0; i < bc; i++) {
+        const BranchNode *b = &h->branches[i];
+        if (l->nodes[i].label_of != (size_t)-1 ||
+            b->first_own_pos == (size_t)-1 || b->fork_pos == (size_t)-1 ||
+            b->first_own_pos == b->fork_pos)
+            continue;
+        bool trovato = false;
+        for (size_t ei = 0; ei < l->cedge_count && !trovato; ei++)
+            if (l->cedges[ei].kind == LAYOUT_CEDGE_BRANCH &&
+                l->cedges[ei].from == b->first_own_pos &&
+                l->cedges[ei].to == b->fork_pos)
+                trovato = true;
+        CHECK(trovato, "%s: '%s' senza arco di diramazione %zu -> %zu",
+              etichetta, b->name, b->first_own_pos, b->fork_pos);
+    }
 }
 
 #endif

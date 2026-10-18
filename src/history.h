@@ -104,6 +104,23 @@ typedef struct {
     BranchNode *branches;
     size_t branch_count;
     const GitData *data;  /* prestito */
+
+    /* Proprietario dei commit: un indice per commit di data->commits, con
+     * l'indice in `branches` del ramo che lo reclama oppure SIZE_MAX se
+     * nessun ramo lo reclama (per esempio la catena di un ramo cancellato
+     * dopo un merge: e' raggiungibile, ma non appartiene piu' a nessuno).
+     * In layout questi commit restano nella corsia anonima, in coda.
+     *
+     * La regola: i tronchi reclamano la loro catena dei primi genitori
+     * nell'ordine di [long-lived]; poi ogni altro ramo reclama, risalendo
+     * dalla punta, i commit non ancora assegnati, fermandosi al primo gia'
+     * assegnato (il suo punto di diramazione). Un padre reclama sempre prima
+     * dei figli, cosi' il figlio si ferma al fork e non risale oltre. I nomi
+     * non decidono niente: l'ordine usa la struttura e, fra fratelli, l'eta'
+     * dei rami.
+     *
+     * NULL quando non c'e' nessun branch. */
+    size_t *commit_owner;
 } History;
 
 /* Costruisce il modello dei branch. `cfg` puo' essere NULL (nessun

@@ -2,9 +2,10 @@
  *
  * Tutto lavora su indici precalcolati: nessuna scansione di nomi nei passi
  * interni (history_find_branch compare solo quando si risolve il nome di un
- * padre, una volta per famiglia). Gli ordinamenti usano chiavi strutturali
- * (posizioni nel log, ordine di [long-lived]), mai l'ordine alfabetico, cosi'
- * la disposizione non cambia se si rinominano i riferimenti.
+ * padre, una volta per famiglia, e per l'etichetta remota). Gli ordinamenti
+ * usano chiavi strutturali (posizioni nel log, ordine di [long-lived]), mai
+ * l'ordine alfabetico, cosi' la disposizione non cambia se si rinominano i
+ * riferimenti.
  */
 #include "layout.h"
 
@@ -16,9 +17,8 @@
 
 #define NO_IDX ((size_t)-1)
 
-/* Una famiglia: i riferimenti con la stessa punta (stessa genealogia, stessa
- * corsia). Per la disposizione bastano il rappresentante e i dati strutturali
- * della famiglia. */
+/* Una famiglia: i riferimenti con la stessa genealogia (stessa corsia). Per
+ * la disposizione bastano il rappresentante e i dati strutturali. */
 typedef struct {
     size_t *members;   /* indici in History.branches */
     size_t count;
@@ -85,9 +85,27 @@ static size_t branch_row(const BranchNode *b)
     return NO_IDX;
 }
 
+/* Cammino a soli primi genitori da `from` a `to` (in una delle due direzioni
+ * si prova invertendo). Serve all'etichetta remota: la punta del remoto e
+ * quella del locale stanno sulla stessa linea. */
+static bool chain_reaches(const GitData *d, size_t from, size_t to)
+{
+    if (!d || from == NO_IDX || to == NO_IDX || from >= d->commit_count ||
+        to >= d->commit_count)
+        return false;
+    for (size_t cur = from; cur != NO_IDX && cur < d->commit_count;) {
+        if (cur == to)
+            return true;
+        const GitCommit *c = &d->commits[cur];
+        cur = c->parent_count ? c->parent_idx[0] : NO_IDX;
+    }
+    return false;
+}
+
 void layout_build(Layout *out, const History *h)
 {
     memset(out, 0, sizeof *out);
+    out->anon_lane = NO_IDX;
     size_t n = h->branch_count;
     out->rows = h->data ? h->data->commit_count : 0;
     out->node_count = n;
@@ -97,38 +115,60 @@ void layout_build(Layout *out, const History *h)
 
     size_t cc = out->rows;
 
-    /* --- famiglie: stessa punta, stessa corsia ---------------------------- */
+    /* --- famiglie: stessa genealogia, stessa corsia ----------------------- */
     size_t *fam_of = xmalloc(n * sizeof(size_t));
+    size_t *label_of = xmalloc(n * sizeof(size_t));
+    for (size_t i = 0; i < n; i++)
+        label_of[i] = NO_IDX;
     size_t *seen = xmalloc((cc ? cc : 1) * sizeof(size_t));
     for (size_t k = 0; k < cc; k++)
         seen[k] = NO_IDX;
 
     Fam *fams = xmalloc(n * sizeof(Fam));
     size_t fam_count = 0;
-    for (size_t i = 0; i < n; i++) {
-        const BranchNode *b = &h->branches[i];
-        size_t tip = b->tip_pos;
-        size_t f;
-        if (tip != NO_IDX && tip < cc && seen[tip] != NO_IDX) {
-            f = seen[tip];
-        } else {
-            f = fam_count++;
-            memset(&fams[f], 0, sizeof fams[f]);
-            fams[f].rep = i;
-            fams[f].rank = INT_MAX;
-            fams[f].parent = NO_IDX;
-            fams[f].kind = LAYOUT_EDGE_PARENT;
-            if (tip != NO_IDX && tip < cc)
-                seen[tip] = f;
-        }
-        fam_of[i] = f;
-        fams[f].members =
-            xrealloc(fams[f].members, (fams[f].count + 1) * sizeof(size_t));
-        fams[f].members[fams[f].count++] = i;
-        if (b->is_long_lived) {
-            fams[f].trunk = true;
-            if (b->long_lived_rank >= 0 && b->long_lived_rank < fams[f].rank)
-                fams[f].rank = b->long_lived_rank;
+    /* due passate: prima i rami locali (creano le famiglie), poi i remoti,
+     * che possono essere solo etichette di un locale */
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t i = 0; i < n; i++) {
+            const BranchNode *b = &h->branches[i];
+            if ((pass == 0) == b->is_remote)
+                continue;
+            size_t tip = b->tip_pos;
+            size_t f = NO_IDX;
+            if (b->is_remote) {
+                /* etichetta: il locale con lo stesso nome, se la punta del
+                 * remoto sta sulla sua catena dei primi genitori */
+                size_t li = history_find_branch(h, b->canonical);
+                if (li != NO_IDX && li != i && !h->branches[li].is_remote &&
+                    (chain_reaches(h->data, tip, h->branches[li].tip_pos) ||
+                     chain_reaches(h->data, h->branches[li].tip_pos, tip))) {
+                    f = fam_of[li];
+                    label_of[i] = li;
+                }
+            }
+            if (f == NO_IDX) {
+                if (tip != NO_IDX && tip < cc && seen[tip] != NO_IDX) {
+                    f = seen[tip];
+                } else {
+                    f = fam_count++;
+                    memset(&fams[f], 0, sizeof fams[f]);
+                    fams[f].rep = i;
+                    fams[f].rank = INT_MAX;
+                    fams[f].parent = NO_IDX;
+                    fams[f].kind = LAYOUT_EDGE_PARENT;
+                    if (tip != NO_IDX && tip < cc)
+                        seen[tip] = f;
+                }
+            }
+            fam_of[i] = f;
+            fams[f].members =
+                xrealloc(fams[f].members, (fams[f].count + 1) * sizeof(size_t));
+            fams[f].members[fams[f].count++] = i;
+            if (b->is_long_lived) {
+                fams[f].trunk = true;
+                if (b->long_lived_rank >= 0 && b->long_lived_rank < fams[f].rank)
+                    fams[f].rank = b->long_lived_rank;
+            }
         }
     }
 
@@ -219,6 +259,14 @@ void layout_build(Layout *out, const History *h)
         for (size_t k = child_start[f + 1]; k-- > child_start[f];)
             stack[sp++] = child_items[k];
     }
+    /* famiglie che la visita non raggiunge (ciclo di paternita' in un modello
+     * artificiale): comunque una corsia, in coda */
+    for (size_t f = 0; f < fam_count; f++) {
+        if (!fams[f].assigned) {
+            fams[f].lane = next++;
+            fams[f].assigned = true;
+        }
+    }
     out->lanes = next;
 
     /* --- nodi ------------------------------------------------------------- */
@@ -226,9 +274,11 @@ void layout_build(Layout *out, const History *h)
         out->nodes[i].branch = i;
         out->nodes[i].lane = fams[fam_of[i]].lane;
         out->nodes[i].row = branch_row(&h->branches[i]);
+        out->nodes[i].label_of = label_of[i];
     }
 
-    /* --- archi: un arco per branch che ha un padre (o un suggerito) ------- */
+    /* --- archi tra branch: un arco per branch che ha un padre (o un
+     * suggerito) --------------------------------------------------------- */
     out->edges = xmalloc((n ? 2 * n : 1) * sizeof(LayoutEdge));
     size_t e = 0;
     for (size_t i = 0; i < n; i++) {
@@ -255,10 +305,84 @@ void layout_build(Layout *out, const History *h)
     }
     out->edge_count = e;
 
+    /* --- commit: riga, corsia, proprietario ------------------------------- */
+    out->commit_count = cc;
+    out->commits = xcalloc(cc ? cc : 1, sizeof(LayoutCommit));
+    const size_t *owners = h->data ? h->commit_owner : NULL;
+    bool anon = false;
+    for (size_t ci = 0; ci < cc; ci++) {
+        if (!owners || owners[ci] == NO_IDX) {
+            anon = true;
+            break;
+        }
+    }
+    if (anon)
+        out->anon_lane = out->lanes++;
+    for (size_t ci = 0; ci < cc; ci++) {
+        LayoutCommit *cell = &out->commits[ci];
+        size_t owner = owners ? owners[ci] : NO_IDX;
+        cell->commit = ci;
+        cell->row = ci;
+        if (owner != NO_IDX && owner < n) {
+            cell->owner = owner;
+            cell->lane = fams[fam_of[owner]].lane;
+        } else {
+            cell->owner = NO_IDX;
+            cell->lane = out->anon_lane;
+        }
+    }
+
+    /* --- archi tra commit -------------------------------------------------- */
+    size_t cap = fam_count;
+    if (h->data)
+        for (size_t ci = 0; ci < cc; ci++)
+            cap += h->data->commits[ci].parent_count;
+    out->cedges = xmalloc((cap ? cap : 1) * sizeof(LayoutCommitEdge));
+    size_t ce = 0;
+    if (h->data) {
+        for (size_t ci = 0; ci < cc; ci++) {
+            const GitCommit *gc = &h->data->commits[ci];
+            for (size_t k = 0; k < gc->parent_count; k++) {
+                size_t p = gc->parent_idx[k];
+                if (p == NO_IDX || p >= cc)
+                    continue;
+                out->cedges[ce].from = ci;
+                out->cedges[ce].to = p;
+                out->cedges[ce].kind = (k == 0) ? LAYOUT_CEDGE_FIRST_PARENT
+                                                : LAYOUT_CEDGE_MERGE_PARENT;
+                ce++;
+            }
+        }
+    }
+    /* un arco di diramazione per ogni ramo che ha un primo commit proprio e un
+     * punto di diramazione; le etichette remote no (condividono la corsia del
+     * locale) e gli archi identici non si duplicano */
+    for (size_t i = 0; i < n; i++) {
+        const BranchNode *b = &h->branches[i];
+        if (label_of[i] != NO_IDX || b->first_own_pos == NO_IDX ||
+            b->fork_pos == NO_IDX || b->first_own_pos == b->fork_pos ||
+            b->first_own_pos >= cc || b->fork_pos >= cc)
+            continue;
+        bool dup = false;
+        for (size_t k = 0; k < ce && !dup; k++)
+            if (out->cedges[k].kind == LAYOUT_CEDGE_BRANCH &&
+                out->cedges[k].from == b->first_own_pos &&
+                out->cedges[k].to == b->fork_pos)
+                dup = true;
+        if (dup)
+            continue;
+        out->cedges[ce].from = b->first_own_pos;
+        out->cedges[ce].to = b->fork_pos;
+        out->cedges[ce].kind = LAYOUT_CEDGE_BRANCH;
+        ce++;
+    }
+    out->cedge_count = ce;
+
     for (size_t f = 0; f < fam_count; f++)
         free(fams[f].members);
     free(fams);
     free(fam_of);
+    free(label_of);
     free(seen);
     free(roots);
     free(child_start);
@@ -272,6 +396,8 @@ void layout_free(Layout *l)
         return;
     free(l->nodes);
     free(l->edges);
+    free(l->commits);
+    free(l->cedges);
     memset(l, 0, sizeof *l);
 }
 

@@ -23,7 +23,7 @@
  * "configurato").
  *
  * Politica di validazione: un errore rifiuta il file per intero (niente
- * configurazione a metà), gli avvisi lasciano applicare il file e vengono
+ * configurazione a meta'), gli avvisi lasciano applicare il file e vengono
  * elencati nel ConfigReport.
  */
 #ifndef GG_CONFIG_H
