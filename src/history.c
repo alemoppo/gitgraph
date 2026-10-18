@@ -627,9 +627,8 @@ static void mark_chain(Ctx *ctx, size_t b)
         ctx->mark_gen[cur] = ctx->mark;
 }
 
-/* X e' un figlio di b (nel punto c): si stacca dalla catena di b, quindi sta
- * sotto e non puo' esserne il padre. Si riconosce dalla sola struttura e dagli
- * orari dei commit (dati di Git), mai dai nomi:
+/* X e' un figlio di b (nel punto c) se b prosegue in X: si riconosce dalla
+ * sola struttura, mai dai nomi e mai dall'ordine di nascita:
  *  - f(X) sta sulla catena di b ed e' piu' in alto di c: X e' nato dentro il
  *    ramo di b, sopra il punto in cui i due si incontrano (sulla stessa catena
  *    l'ordine delle posizioni nel log e' quello degli antenati);
@@ -637,14 +636,16 @@ static void mark_chain(Ctx *ctx, size_t b)
  *    e' il figlio, senza guardare le date;
  *  - f(X) == c e X ha integrato b con un merge (b sta nella storia di X ma non
  *    sulla sua catena dei primi genitori): X e' il padre, non un figlio;
- *  - f(X) == c e nessuno dei due contiene l'altro: i due rami sono fratelli,
- *    nati dallo stesso punto. Vince l'ordine di nascita: prima l'orario dei
- *    commit di punta (dato di Git); a parita' d'orario, come nei repository
- *    generati in blocco dove ogni commit ha lo stesso timestamp, la posizione
- *    nel log, dove i discendenti precedono gli antenati. Anche questa e' una
- *    posizione di Git, non un nome: ecco perche' permutare i nomi non cambia
- *    nulla (lo verifica il test di invarianza). Resta comunque un fatto, non
- *    una prova: se la struttura non piacesse, [parents] la dichiara.
+ *  - f(X) == c e b ha integrato X con un merge (la punta di X e' raggiungibile
+ *    da b ma non sta sulla catena dei primi genitori di b): X e' il contenuto
+ *    di un merge gia' assunto da b, quindi non puo' essere un padre plausibile;
+ *    (se invece la punta di X sta sulla catena di b, e' un padre regolare e
+ *    non e' la via del merge);
+ *  - f(X) == c e nessuno dei due casi: i due rami sono fratelli nati dallo
+ *    stesso punto. La storia non registra chi sia nato prima, e l'ordine di
+ *    nascita (date e posizioni nel log) e' inaffidabile con un rebase: non
+ *    decide piu' niente. Restano in lizza entrambi, la coppia arriva ambigua
+ *    alla scelta e il padre si dichiara in [parents].
  *
  * `mark` e' la generazione con cui e' stata marchiata la catena di b. */
 static bool is_child_at(const Ctx *ctx, size_t b, size_t c, size_t x, uint32_t mark)
@@ -662,11 +663,10 @@ static bool is_child_at(const Ctx *ctx, size_t b, size_t c, size_t x, uint32_t m
             return true; /* b continua in X: X e' il figlio */
         if (bitset_test(xf->reach, bf->tip_idx))
             return false; /* X ha integrato b con un merge: X e' il padre */
-        int64_t dx = date_at(ctx, xf->tip_idx);
-        int64_t db = date_at(ctx, bf->tip_idx);
-        if (dx != db)
-            return dx > db; /* fratelli: nato dopo e' il figlio */
-        return xf->tip_idx < bf->tip_idx; /* stessi orari: ordine di nascita */
+        if (ctx->mark_gen[xf->tip_idx] != mark &&
+            bitset_test(bf->reach, xf->tip_idx))
+            return true; /* b ha integrato X con un merge: X e' merge assunto */
+        return false; /* fratelli nati dallo stesso punto: entrambi in lizza */
     }
     return false;
 }
@@ -1028,8 +1028,16 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
              *     quella famiglia e' il padre: lo decide la struttura;
              *  2. se un tronco (long-lived) e' fra i candidati, e' il padre:
              *     un tronco non si deduce, e' dichiarato;
-             *  3. se resta un solo candidato, e' il padre "dedotto";
-             *  4. se ne restano piu' di uno, nessuno e' preferibile agli
+             *  3. se un candidato ha integrato b con un merge (la punta di b
+             *     sta nella sua storia), e' il padre: lo dice la struttura;
+             *     vale anche se nato dallo stesso punto, perche' il merge e'
+             *     un fatto;
+             *  4. se resta un solo candidato e NON e' nato dallo stesso punto
+             *     di diramazione, e' il padre "dedotto";
+             *  5. fratelli nati dallo stesso punto: sempre ambigui, anche se
+             *     il candidato e' uno solo (regola 1, dichiarata e testata
+             *     sui casi mk3);
+             *  6. se ne restano piu' di uno, nessuno e' preferibile agli
              *     altri: stato ambiguo con l'elenco dei candidati e un
              *     suggerimento (non e' un padre dedotto: il layout lo tratta
              *     come tratteggiato finche' [parents] non dichiara il padre). */
@@ -1048,7 +1056,29 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
             }
             if (chosen == NO_POS)
                 chosen = trunk_among(ctx, b);
-            if (chosen == NO_POS && b->cand_count == 1)
+            /* X che integra b con un merge (b sta nella storia di X): e' il
+             * padre, lo dice la struttura. Vale anche quando nasce dallo
+             * stesso punto: il merge e' un fatto, i fratelli no. */
+            if (chosen == NO_POS) {
+                for (size_t k = 0; k < b->cand_count; k++) {
+                    const Family *cf = &ctx->families[b->cand[k]];
+                    if (cf->tip_idx != NO_POS &&
+                        bitset_test(cf->reach, b->tip_idx)) {
+                        chosen = b->cand[k];
+                        break;
+                    }
+                }
+            }
+            /* fratelli: un candidato nato dallo stesso punto di diramazione
+             * rende la coppia ambigua per natura, anche da solo */
+            bool fratelli = false;
+            for (size_t k = 0; k < b->cand_count; k++) {
+                if (ctx->families[b->cand[k]].f == b->fork_dec) {
+                    fratelli = true;
+                    break;
+                }
+            }
+            if (chosen == NO_POS && b->cand_count == 1 && !fratelli)
                 chosen = b->cand[0]; /* un solo candidato: e' il padre dedotto */
             const char *chosen_name =
                 (chosen != NO_POS) ? family_local_name(ctx, &ctx->families[chosen]) : NULL;
@@ -1085,37 +1115,62 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                 /* Suggerimento fra i candidati: il piu' vecchio, perche' la
                  * struttura non distingue e di solito il padre e' quello su cui
                  * gli altri sono nati. Non e' un fatto dedotto: [parents]
-                 * dichiara il padre vero. */
+                 * dichiara il padre vero.
+                 *
+                 * Solo i candidati piu' antichi di questo ramo sono suggeriti:
+                 * l'eta' conta (data del primo commit proprio dopo il fork, a
+                 * parita' il nome) e il confronto con il ramo stesso rende il
+                 * suggerimento decrescente nell'ordine (data, nome), quindi la
+                 * catena dei padri suggeriti non puo' chiudere in ciclo ed e'
+                 * deterministica. Per il ramo piu' antico della diramazione non
+                 * c'e' un padre da suggerire fra i candidati. */
+                int64_t self_date = (b->first_own != NO_POS)
+                                        ? date_at(ctx, b->first_own)
+                                        : date_at(ctx, b->tip_idx);
+                const char *self_name =
+                    ctx->out->branches[b->rep_node].name;
                 size_t best = NO_POS;
                 int64_t best_date = 0;
-                size_t best_name = NO_POS;
+                const char *best_name = NULL;
                 bool name_tie = false;
                 for (size_t k = 0; k < b->cand_count; k++) {
                     const Family *c = &ctx->families[b->cand[k]];
                     int64_t when = (c->first_own != NO_POS) ? date_at(ctx, c->first_own)
                                                              : date_at(ctx, c->tip_idx);
-                    size_t rep = c->rep_node;
+                    const char *cname =
+                        ctx->out->branches[c->rep_node].name;
+                    /* eleggibile solo se piu' antico di b (o, a parita' di
+                     * data, col nome minore: spareggio dichiarato) */
+                    bool valido;
+                    if (when != self_date)
+                        valido = (when < self_date);
+                    else
+                        valido = (strcmp(cname, self_name) < 0);
+                    if (!valido)
+                        continue;
                     bool meglio;
                     if (best == NO_POS) {
                         meglio = true;
                     } else if (when != best_date) {
                         meglio = (when < best_date);
+                        if (!meglio)
+                            continue;
+                        name_tie = false;
                     } else {
-                        /* stessa data: spareggio dichiarato sul nome */
-                        int cmp = strcmp(ctx->out->branches[rep].name,
-                                         ctx->out->branches[best_name].name);
-                        meglio = (cmp < 0);
-                        if (cmp != 0)
-                            name_tie = true;
-                        else
-                            name_tie = false;
+                        int cmp = strcmp(cname, best_name);
+                        if (cmp < 0) {
+                            meglio = true;
+                        } else {
+                            meglio = false;
+                            if (cmp == 0)
+                                continue;
+                        }
+                        name_tie = true;
                     }
-                    if (best == NO_POS || meglio) {
-                        if (best != NO_POS && when == best_date)
-                            name_tie = true;
+                    if (meglio) {
                         best = b->cand[k];
                         best_date = when;
-                        best_name = rep;
+                        best_name = cname;
                     }
                 }
                 if (best != NO_POS) {
@@ -1131,6 +1186,10 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                                               ? "padre suggerito per nome, a parita' di data"
                                               : "padre suggerito per data, poco affidabile con rebase");
                     sb_appendf(&mot, ": '%s'", d->suggested);
+                } else {
+                    append_note(&mot,
+                                "nessun padre suggerito: il ramo e' il piu' antico "
+                                "della diramazione; il padre si dichiara in [parents]");
                 }
             }
         }

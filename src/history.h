@@ -83,9 +83,13 @@ typedef struct {
     char **candidates;    /* candidati (ordinati), solo informativo */
     size_t candidate_count;
 
-    /* Padre suggerito: valido solo con stato AMBIGUO e piu' candidati. Non e'
-     * un padre dedotto ne' certo: serve a piazzare il branch (tratteggiato)
-     * finche' [parents] non dichiara il padre vero. */
+    /* Padre suggerito: valido solo con stato AMBIGUO. Non e' un padre
+     * dedotto ne' certo: e' il candidato ambiguo piu' antico (col primo
+     * commit proprio piu' vecchio del branch, data; a parita', il nome),
+     * dichiarato nella motivazione. Assente per il ramo piu' antico della
+     * diramazione. Il grafo dei padri suggeriti non ha cicli. Serve a
+     * piazzare il branch (tratteggiato) finche' [parents] non dichiara il
+     * padre vero. */
     char *suggested_parent;
     SuggestionBasis suggestion_basis;
 } BranchNode;

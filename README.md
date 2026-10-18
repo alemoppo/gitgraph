@@ -177,34 +177,47 @@ padre, stato e motivazione. `--full` mostra i messaggi di commit completi.
   un padre), `nessuno`. Si sceglie in quest'ordine: se il punto di diramazione
   e' la punta di un'altra famiglia, quella famiglia e' il padre (lo decide la
   struttura); se fra i candidati c'e' un tronco, e' il padre (un long-lived non
-  si deduce, e' dichiarato); se resta un solo candidato, e' il padre dedotto;
-  se ne restano piu' di uno, lo stato e' `ambiguo` con l'elenco dei candidati.
+  si deduce, e' dichiarato); se un candidato ha integrato il branch con un
+  merge (la punta del branch sta nella sua storia), e' il padre (lo dice la
+  struttura; vale anche se e' nato dallo stesso punto, perche' il merge e' un
+  fatto); se resta un solo candidato nato prima del branch, e' il padre
+  dedotto. Due rami nati dallo **stesso punto di diramazione** (nessuno
+  contenente l'altro) sono sempre `ambigui` l'uno con l'altro, anche se il
+  candidato e' uno solo: senza ordine di nascita la struttura non distingue
+  chi e' nato prima, e l'unico modo per dirlo e' dichiararlo in `[parents]`.
 - **Padre suggerito** (`suggested_parent`, `suggestion_basis`): nei casi
-  ambigui con piu' candidati il modello indica un suggerimento, **non** un
-  padre: non e' uno stato "certo" ne' "dedotto". Il criterio e' documentato e
-  verificato dal test: fra i candidati e' il piu' vecchio (col primo commit
-  proprio piu' vecchio), a parita' di date e' il nome, e la motivazione dichiara
+  ambigui il modello indica un suggerimento, **non** un padre: non e' uno stato
+  "certo" ne' "dedotto". Il criterio e' documentato e verificato dal test: fra
+  i candidati ambigui e' il piu' vecchio (col primo commit proprio piu'
+  vecchio del branch), a parita' di date e' il nome, e la motivazione dichiara
   la base del suggerimento ("padre suggerito per data, poco affidabile con
-  rebase", oppure lo spareggio sul nome). Serve al layout per piazzare il branch
-  in modo tratteggiato finche' il padre non e' dichiarato.
+  rebase", oppure lo spareggio sul nome). Se nessun candidato e' piu' antico
+  del branch, il branch e' il piu' vecchio della diramazione e nessun padre e'
+  suggerito. Il grafo dei padri suggeriti non ha cicli. Serve al layout per
+  piazzare il branch in modo tratteggiato finche' il padre non e' dichiarato.
 - **Gli ambigui si risolvono con `[parents]`**: finche' il padre non e'
   dichiarato in `graph.cfg`, il caso resta ambiguo e il layout mostra il
   suggerimento come tratteggio. Un override valido ha precedenza assoluta e
   rende il padre `configurato`. Esempio: nel repository di prova `branch2` e'
   nato da un commit (B2) che sta sia sulla catena di `branch1` sia su quella di
   `sp`, quindi e' ambiguo fra i due e il suggerimento e' `branch1`;
-  `parents = branch2 branch1` lo rende certo.
+  `parents = branch2 branch1` lo rende certo. Due fratelli nati dallo stesso
+  punto (`feature/login` e `bugfix/crash` nel repository di riproduzione mk3)
+  si dichiarano allo stesso modo.
 - **Gruppi di alias**: piu' riferimenti sulla stessa punta formano una
   famiglia (stessa catena, quindi stesso padre dedotto); fra piu' branch
   **locali** sulla stessa punta resta ambiguo quale sia il nome del padre, e
   la motivazione lo dichiara.
 - **Long-lived**: sono il tronco o le linee principali; non hanno padre
   dedotto, ne' punto di diramazione, ne' candidati.
-- **Date**: non scelgono mai il padre. Servono in due casi, entrambi dichiarati:
-  a parita' di punto di diramazione fra due rami, e' figlio quello nato dopo
-  (orario del commit di punta); fra candidati ambigui, l'eta' decide il solo
-  **suggerimento**. Le date non filtrano piu' nessun candidato, quindi la
-  motivazione non contiene piu' uno "scarto dei candidati per data".
+- **Date**: non scelgono mai il padre. Non esistono piu' ne' lo scarto di un
+  candidato per data (un ramo nato dopo non e' "figlio": senza ordine di
+  nascita, due rami nati dallo stesso punto restano fratelli) ne' l'uso della
+  data per decidere il padre. L'eta' decide solo il **suggerimento**: fra
+  candidati ambigui, il padre suggerito e' quello col primo commit proprio
+  piu' vecchio. Quindi la motivazione non contiene piu' uno "scarto dei
+  candidati per data", mentre la frase "padre suggerito per data, poco
+  affidabile con rebase" resta, dichiarata.
 - Dettagli e dimostrazione dei filtri: `src/history.h` e l'intestazione di
   `src/history.c`.
 
@@ -283,7 +296,12 @@ Undici test, nessuno con finestra:
    30 s (determinismo verificato anche sul repository grande);
 8. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
    15 s, con ogni branch nato dal precedente (catena profonda): verifica il
-   controllo delle relazioni circolari e l'ordinamento dei padri.
+   controllo delle relazioni circolari e l'ordinamento dei padri;
+9. `invariance` verifica anche che il grafo dei padri suggeriti non contenga
+   cicli in nessuna permutazione, e costruisce i quattro casi di riproduzione
+   mk3 (due rami nati dallo stesso punto, modalita' A e B con i nomi in
+   entrambi gli ordini): tutti devono risultare `ambigui` con l'altro come
+   unico candidato e un solo padre suggerito per data.
 
 I repository di scala sono sintetici e deterministici: `tests/make_scale_repo.c`
 genera su stdout uno stream per `git fast-import` (commit su `main`, un
@@ -293,9 +311,9 @@ importa con `git fast-import`. Il budget misura solo lettura del repository e
 costruzione del modello, non la generazione.
 
 Il repository di prova contiene: merge `--no-ff`, fast-forward, branch
-cancellato, gruppo di alias (piu' branch sullo stesso commit) e un branch
-figlio ambiguo tra i membri del gruppo, gruppo isolato (tre rami dallo stesso
-commit: uno dedotto, uno ambiguo con padre suggerito per data), ramo nato da
+cancellato, gruppo di alias (piu' branch sullo stesso commit), gruppo isolato
+(tre rami dallo stesso commit: tutti ambigui fra loro, con il padre
+suggerito per data dichiarato solo sul ramo nato dopo), ramo nato da
 un commit interno di un altro ramo (che resta ambiguo fra i due rami che lo
 contengono),
 riferimenti remoti con punte diverse (`origin/main`, `upstream/main`) piu' uno

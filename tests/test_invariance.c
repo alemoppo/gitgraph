@@ -245,6 +245,41 @@ static size_t permutations(size_t n, size_t perm[][4], size_t max)
     }
     return count;
 }
+/* ---------- aciclicita' dei padri suggeriti ---------- */
+
+/* I padri suggeriti formano un grafo con un arco per ogni stato 'ambiguo' con
+ * suggerimento: se contenessero un ciclo, il layout non potrebbe seguirli e
+ * la "catena dei padri" non avrebbe senso. La selezione del suggerito scende
+ * nell'ordine (data, nome), quindi un ciclo non puo' chiudersi: qui si
+ * verifica a posteriori su ogni modello costruito. */
+static void check_suggestions_acyclic(const History *h, const char *etichetta)
+{
+    size_t count = h->branch_count;
+    for (size_t i = 0; i < count; i++) {
+        if (!h->branches[i].suggested_parent)
+            continue;
+        /* senza cicli la catena dei padri suggeriti termina in un branch
+         * senza suggerimento: altrimenti un nodo tornerebbe su se stesso e
+         * il cammino non finirebbe */
+        size_t cur = i;
+        size_t steps = 0;
+        while (steps < count &&
+               h->branches[cur].suggested_parent != NULL) {
+            size_t nxt = history_find_branch(h, h->branches[cur].suggested_parent);
+            if (nxt == (size_t)-1) {
+                CHECK(false, "%s: suggerito '%s' non risolvito", etichetta,
+                      h->branches[cur].suggested_parent);
+                break;
+            }
+            cur = nxt;
+            steps++;
+        }
+        CHECK(steps < count || !h->branches[cur].suggested_parent,
+              "%s: ciclo nel grafo dei padri suggeriti partendo da '%s'",
+              etichetta, h->branches[i].name);
+    }
+}
+
 /* ---------- confronto su tutti i gruppi ---------- */
 
 static void check_group(const GitData *base, const char **names, size_t n,
@@ -279,6 +314,9 @@ static void check_group(const GitData *base, const char **names, size_t n,
             continue;
         }
         char *desc = describe(&hist, &permuted);
+        /* il grafo dei padri suggeriti non deve chiudere in ciclo, in
+         * nessuna permutazione */
+        check_suggestions_acyclic(&hist, etichetta);
         if (k == 0) {
             riferimento = desc;
             printf("%s: %zu permutazioni, modello di riferimento:\n%s", etichetta,
@@ -503,6 +541,158 @@ static void remove_tree(const char *path)
     RemoveDirectoryA(path);
 }
 
+/* ---------- i casi di riproduzione mk3: due fratelli sullo stesso punto ---- */
+
+/* Un commit vuoto con l'istante voluto. Lo script di riproduzione mk3.sh usa
+ * una data per riga (`cm N`): qui l'ordine relativo delle date resta lo
+ * stesso, con istanti separati per non introdurre pareggi di data. */
+static bool commit_at(const char *path, long long istante, const char *msg,
+                      char *err, size_t err_size)
+{
+    char date[40];
+    snprintf(date, sizeof date, "@%lld +0000", istante);
+    SetEnvironmentVariableA("GIT_AUTHOR_DATE", date);
+    SetEnvironmentVariableA("GIT_COMMITTER_DATE", date);
+    const char *cm[] = {"-c", "user.name=T", "-c", "user.email=t@t", "commit",
+                        "-q", "--allow-empty", "-m", msg, NULL};
+    bool ok = run_git_in(path, cm, err, err_size);
+    SetEnvironmentVariableA("GIT_AUTHOR_DATE", NULL);
+    SetEnvironmentVariableA("GIT_COMMITTER_DATE", NULL);
+    return ok;
+}
+
+/* Lo stesso storico dello script di riproduzione mk3.sh: main (A, B), il
+ * genitore P (L1, L2) nato da main~1, il figlio C che nasce a L2 e il
+ * genitore che prosegue con L3 prima (modalita' A) o dopo (modalita' B) del
+ * lavoro di C. In entrambi i casi il punto di diramazione di entrambi i rami
+ * e' L2: due fratelli nati dallo stesso punto. */
+static bool make_mk3(const char *path, const char *p_name, const char *c_name,
+                     char mode, char *err, size_t err_size)
+{
+    back_to(g_work);
+    remove_tree(path);
+    CreateDirectoryA(path, NULL);
+    const char *init[] = {"init", "-b", "main", "-q", NULL};
+    if (!run_git_in(path, init, err, err_size))
+        return false;
+    long long t = 1771000000; /* base fissa: il repo e' ripetibile */
+    if (!commit_at(path, t, "A", err, err_size) ||
+        !commit_at(path, t + 1, "B", err, err_size))
+        return false;
+    const char *co_p[] = {"checkout", "-q", "-b", p_name, "main~1", NULL};
+    if (!run_git_in(path, co_p, err, err_size))
+        return false;
+    if (!commit_at(path, t + 2, "L1", err, err_size) ||
+        !commit_at(path, t + 3, "L2", err, err_size))
+        return false;
+    if (mode == 'A') {
+        /* il genitore prosegue (L3), poi il figlio nasce da P~1 (= L2) */
+        if (!commit_at(path, t + 4, "L3", err, err_size))
+            return false;
+        char da[MAX_PATH];
+        snprintf(da, sizeof da, "%s~1", p_name);
+        const char *co_c[] = {"checkout", "-q", "-b", c_name, da, NULL};
+        if (!run_git_in(path, co_c, err, err_size))
+            return false;
+        if (!commit_at(path, t + 5, "C1", err, err_size))
+            return false;
+    } else {
+        /* il figlio nasce dalla punta del genitore (= L2), poi il genitore
+         * prosegue (L3) */
+        const char *co_c[] = {"checkout", "-q", "-b", c_name, p_name, NULL};
+        if (!run_git_in(path, co_c, err, err_size))
+            return false;
+        if (!commit_at(path, t + 4, "C1", err, err_size))
+            return false;
+        const char *back[] = {"checkout", "-q", p_name, NULL};
+        if (!run_git_in(path, back, err, err_size))
+            return false;
+        if (!commit_at(path, t + 5, "L3", err, err_size))
+            return false;
+    }
+    const char *fine[] = {"checkout", "-q", "main", NULL};
+    return run_git_in(path, fine, err, err_size);
+}
+
+/* Verita' nota dei casi mk3 (regola dei fratelli): i due rami nascono dallo
+ * stesso punto e nessuno contiene l'altro, quindi sono sempre ambigui
+ * l'uno con l'altro, qualunque sia il nome. Il padre suggerito per data va
+ * solo sul ramo col primo commit proprio piu' recente; il piu' antico della
+ * diramazione resta senza suggerimento. */
+static void check_mk3(const GitData *data, const char *p_name,
+                      const char *c_name, bool p_piu_vecchio,
+                      const char *etichetta)
+{
+    char **names = (char **)calloc(data->ref_count + 1, sizeof(char *));
+    size_t nn = 0;
+    for (size_t i = 0; i < data->ref_count; i++)
+        if (data->refs[i].kind == REF_LOCAL_BRANCH)
+            names[nn++] = data->refs[i].name;
+    GraphConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    config_set_implicit_trunk(&cfg, names, nn);
+    History hist;
+    char err[512];
+    if (!history_build(&hist, data, &cfg, err, sizeof err)) {
+        CHECK(false, "%s: history_build fallita (%s)", etichetta, err);
+        free(names);
+        config_free(&cfg);
+        return;
+    }
+    /* il ramo nato dopo dichiara il suggerimento verso il piu' antico */
+    const char *nome_nato_prima = p_piu_vecchio ? p_name : c_name;
+    const char *nome_nato_dopo = p_piu_vecchio ? c_name : p_name;
+    for (size_t i = 0; i < hist.branch_count; i++) {
+        const BranchNode *b = &hist.branches[i];
+        bool e_prima = strcmp(b->name, nome_nato_prima) == 0;
+        bool e_dopo = strcmp(b->name, nome_nato_dopo) == 0;
+        if (!e_prima && !e_dopo)
+            continue; /* solo i due fratelli; main e' coperto dall'aciclicita' */
+        const char *altro = e_prima ? nome_nato_dopo : nome_nato_prima;
+        CHECK(b->state == PARENT_AMBIGUOUS && b->parent == NULL,
+              "%s: '%s' atteso ambiguo senza padre, trovato %s (stato %d)",
+              etichetta, b->name, b->parent ? b->parent : "-", (int)b->state);
+        CHECK(b->candidate_count == 1 && b->candidates &&
+                  strcmp(b->candidates[0], altro) == 0,
+              "%s: '%s' atteso con unico candidato '%s', trovati %zu",
+              etichetta, b->name, altro, b->candidate_count);
+        if (e_dopo) {
+            CHECK(b->suggested_parent &&
+                      strcmp(b->suggested_parent, nome_nato_prima) == 0,
+                  "%s: '%s' atteso col suggerito '%s', trovato %s", etichetta,
+                  b->name, nome_nato_prima,
+                  b->suggested_parent ? b->suggested_parent : "-");
+            CHECK(b->suggestion_basis == SUGGESTION_DATE,
+                  "%s: '%s' base del suggerimento %d, attesa per data",
+                  etichetta, b->name, (int)b->suggestion_basis);
+            CHECK(b->motivation &&
+                      strstr(b->motivation, "padre suggerito per data") &&
+                      strstr(b->motivation, "poco affidabile con rebase"),
+                  "%s: '%s' motivazione senza la dichiarazione del "
+                  "suggerimento per data: %s",
+                  etichetta, b->name, b->motivation ? b->motivation : "-");
+        } else {
+            CHECK(b->suggested_parent == NULL &&
+                      b->suggestion_basis == SUGGESTION_NONE,
+                  "%s: '%s' e' il piu' antico della diramazione: nessun "
+                  "suggerimento atteso (%s)",
+                  etichetta, b->name,
+                  b->suggested_parent ? b->suggested_parent : "-");
+            CHECK(b->motivation &&
+                      strstr(b->motivation, "nessun padre suggerito"),
+                  "%s: '%s' motivazione senza la dichiarazione dell'assenza "
+                  "di suggerimento: %s",
+                  etichetta, b->name, b->motivation ? b->motivation : "-");
+        }
+    }
+    check_suggestions_acyclic(&hist, etichetta);
+    printf("%s: verificati '%s' e '%s' (fratelli, ambigui)\n", etichetta,
+           nome_nato_prima, nome_nato_dopo);
+    history_free(&hist);
+    free(names);
+    config_free(&cfg);
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -586,6 +776,40 @@ int main(int argc, char **argv)
     remove_tree(path1);
     remove_tree(path2);
     remove_tree(path3);
+
+    /* i quattro casi di riproduzione mk3: modalita' A e B con i nomi in
+     * entrambi gli ordini. La verita' attesa (fratelli sempre ambigui, un
+     * solo suggerimento per data) non dipende dai nomi. */
+    const struct {
+        const char *p, *c;
+        char mode;
+        bool p_vecchio;
+        const char *et;
+    } casi_mk3[] = {
+        {"feature/login", "bugfix/crash", 'A', true,
+         "mk3: modalita' A, genitore feature/login"},
+        {"bugfix/crash", "feature/login", 'A', true,
+         "mk3: modalita' A, nomi invertiti"},
+        {"feature/login", "bugfix/crash", 'B', false,
+         "mk3: modalita' B, genitore feature/login"},
+        {"bugfix/crash", "feature/login", 'B', false,
+         "mk3: modalita' B, nomi invertiti"},
+    };
+    for (size_t m = 0; m < sizeof casi_mk3 / sizeof casi_mk3[0]; m++) {
+        char path_mk[MAX_PATH];
+        snprintf(path_mk, sizeof path_mk, "%s\\gg_invarianza_mk3%zu", root, m);
+        REQUIRE(make_mk3(path_mk, casi_mk3[m].p, casi_mk3[m].c,
+                         casi_mk3[m].mode, err, sizeof err),
+                "creazione del repository %s fallita: %s", casi_mk3[m].et, err);
+        REQUIRE(gitdata_load(&base, path_mk, err, sizeof err),
+                "caricamento del repository %s fallito: %s", casi_mk3[m].et,
+                err);
+        check_mk3(&base, casi_mk3[m].p, casi_mk3[m].c, casi_mk3[m].p_vecchio,
+                  casi_mk3[m].et);
+        gitdata_free(&base);
+        back_to(g_work);
+        remove_tree(path_mk);
+    }
 
     printf("%d controlli superati, %d falliti (%d permutazioni confrontate)\n",
            g_pass, g_fail, permutazioni);

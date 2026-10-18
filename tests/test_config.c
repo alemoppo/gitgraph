@@ -879,12 +879,18 @@ static void test_end_to_end(void)
     CHECK(main_b->fork_hash == NULL && main_b->candidate_count == 0,
           "main: nessun fork ne' candidati");
 
-    /* il resto del modello non cambia */
+    /* branch1, senza l'ordine di nascita, e' ambiguo con branch2 (fratelli
+     * sul commit B2) e non ha piu' main come padre dedotto; il resto del
+     * modello non cambia: branch2 resta ambiguo con suggerito per data
+     * branch1, come nel test core */
     const BranchNode *b1 = branch_named(&hist, "branch1");
     REQUIRE(b1 != NULL, "branch1 assente");
-    CHECK(b1->state == PARENT_DEDUCED && b1->parent &&
-              strcmp(b1->parent, "main") == 0,
-          "branch1: padre dedotto main atteso");
+    CHECK(b1->state == PARENT_AMBIGUOUS && b1->parent == NULL &&
+              b1->candidate_count == 1 && b1->candidates &&
+              strcmp(b1->candidates[0], "branch2") == 0,
+          "branch1: atteso ambiguo con solo branch2 in lizza (padre %s, "
+          "candidati %zu)",
+          b1->parent ? b1->parent : "-", b1->candidate_count);
     const BranchNode *b2 = branch_named(&hist, "branch2");
     REQUIRE(b2 != NULL, "branch2 assente");
     /* branch2 e' nato da B2, che sta sulla catena di branch1 e anche su quella
