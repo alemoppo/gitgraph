@@ -28,36 +28,66 @@
  *    catena (il figlio di f(b)); assente se la punta e' gia' rivendicata da
  *    altri (branch assorbito o fast-forward).
  *
- * 5. Candidati padre b di b, con filtri O(1) grazie alla matrice di relazioni
- *    precalcolata sulle catene dei primi genitori:
- *      D1  la punta di b giace sulla catena di b          -> b discende da b;
- *      D2  f(b) sta sulla catena di b, piu' in alto di f(b) -> b e' figlio;
- *      D3  esistenza: f(b) sta sotto f(b) sulla catena di b -> b non esisteva;
- *      D4  assorbito: b senza commit propri e punta su un'altra catena, e non
- *          proprio il punto di diramazione -> escluso (FF/alias non fanno da
- *          padre); i long-lived sono esentati (il tronco esiste da sempre);
- *      D5  fork uguali: si usa la data del primo commit proprio come
- *          spareggio quando la struttura non decide (scarto del candidato
- *          piu' recente di b); la motivazione lo dichiara sempre.
- *      D6  contenimento: f(b) deve giacere sulla catena di b.
+ * 5. Candidati padre di b. collect_candidates scende la catena dei primi
+ *    genitori (dal figlio della punta) e si ferma al primo punto utile:
+ *      - commit posseduto da un tronco: quel tronco e' l'unico candidato e
+ *        il punto di diramazione;
+ *      - commit condiviso: restano in lizza le famiglie che ci stanno sopra
+ *        e che sono plausibili padri (peer_is_parent: non sono b, non stanno
+ *        dentro b e non sono figlie di b per is_child_at); se nessuna resta
+ *        plausibile (b e' la prosecuzione e gli altri si sono staccati) la
+ *        discesa continua sotto il punto;
+ *      - se il primo punto e' interamente di famiglie nate su quel commit e
+ *        b e' il piu' antico del gruppo per data (strettamente: a parita' la
+ *        scelta spetta al nome e il modello non dipende dai nomi), la discesa
+ *        continua sotto il punto fino al primo antenato non fratello (il
+ *        tronco da cui il gruppo si e' staccato) e lo accoda ai candidati:
+ *        e' elencato e puo' diventare il padre suggerito (vedi 6), ma non
+ *        decide lo stato;
+ *    senza candidati il fallback sono i contenitori della punta.
  *
- * 6. Scelta del padre: se un solo candidato possiede il punto di diramazione
- *    (cioe' quel commit e' nella sua regione propria) e' il padre; se c'e' un
- *    solo candidato e' il padre; altrimenti l'unico candidato a monte di tutti
- *    gli altri; altrimenti ambiguo. Nessun candidato -> fallback: contenitori
- *    della punta (raggiungibilita'), altrimenti nessun padre e la genealogia
- *    viene dichiarata non determinabile. I long-lived non hanno padre, fork ne'
+ *    Figli e padri si riconoscono dalla sola struttura (is_child_at, tempo
+ *    costante grazie ai marchi di catena e ai bitset): f(X) sulla catena di
+ *    b piu' recente del punto -> X e' figlio; f(X) == punto con X dentro la
+ *    famiglia di b -> X e' figlio; f(X) == punto con b integrato in X da un
+ *    merge -> X e' il padre; f(X) == punto con X gia' assorbito da un merge
+ *    di b -> X e' escluso; ogni altro caso sono fratelli nati dallo stesso
+ *    punto e la struttura non registra chi e' nato prima.
+ *
+ * 6. Scelta del padre, in ordine di precedenza: la punta di un'altra
+ *    famiglia sul punto di diramazione; un candidato che ha integrato b con
+ *    un merge; i fratelli (candidati nati dallo stesso punto) restano sempre
+ *    ambigui, anche da soli e anche con un tronco accodato fra gli antenati:
+ *    il ramo potrebbe essere figlio di un fratello. Se non sono fratelli:
+ *    un solo candidato e' il padre dedotto, e un tronco fra i candidati e'
+ *    il padre dichiarato (un long-lived non si deduce). Piu' candidati:
+ *    stato ambiguo con l'elenco e un suggerito, il fratello col primo commit
+ *    proprio piu' vecchio (a parita', il nome; spareggio dichiarato); se il
+ *    ramo e' il piu' antico del gruppo non c'e' un fratello eleggibile e il
+ *    suggerito e' il primo antenato non fratello accodato (un tronco sempre,
+ *    un altro antenato solo se piu' vecchio di b in data e nome, cosi' la
+ *    catena dei suggeriti scende e non fa cicli). Un solo candidato-famiglia
+ *    con piu' nomi locali sulla stessa punta (alias veri): il padre e' la
+ *    famiglia, il nome resta ambiguo con suggerimento per nome. Nessun
+ *    candidato -> fallback: contenitori della punta (raggiungibilita'), o
+ *    nessun padre e genealogia non determinabile; il padre dichiarato in
+ *    [parents] vince su tutto. I long-lived non hanno padre, fork ne'
  *    candidati.
  *
- * 7. Complessita'. Siano C i commit, R i riferimenti, G <= R le famiglie e
- *    L_g la lunghezza della catena dei primi genitori della famiglia g.
- *    Precalcolo: O(C + genitori) per gli indici (in gitdata), O(S L_g) per
- *    l'appartenenza dei commit e i punti di diramazione, O(S L_g + GÂ²) per la
- *    matrice di relazioni, O(S |raggiungibili|) per i bitset di
- *    raggiungibilita'. Deduzione: una sola passata O(GÂ² + S L_g). Il controllo
- *    dei cicli usa una mappa nome->nodo: O(R) per gli aciclici. Nessun
- *    percorso viene rifatto per coppia di branch e nulla viene riallocato per
- *    commit: il costo cresce linearmente con il repository.
+ * 7. Complessita'. Siano C i commit, R i riferimenti, G <= R le famiglie, L_g
+ *    la lunghezza della catena dei primi genitori della famiglia g e V_g la
+ *    dimensione della sua regione raggiungibile. Precalcolo: O(C + genitori)
+ *    per gli indici (in gitdata); O(sum_g L_g) per appartenenza, punti di
+ *    diramazione e primi commit propri; O(G^2) bit per i marchi di
+ *    contenimento (inside) e O(sum_g V_g) bit per i bitset di
+ *    raggiungibilita'. Candidati: una discesa per famiglia sulla catena, con
+ *    ogni domanda a tempo costante sui marchi. Deduzione: una passata per
+ *    famiglia, O(G) quando il punto di diramazione coincide con la punta di
+ *    un'altra famiglia, quindi O(G^2) nel caso peggiore e O(G + candidati)
+ *    per il resto. Il controllo dei cicli usa una mappa nome->nodo: O(R) per
+ *    gli aciclici. Nessun percorso viene rifatto per coppia di commit e
+ *    nulla viene riallocato per commit: il costo cresce con il repository
+ *    senza passate quadratiche sui commit.
  */
 #include "history.h"
 
@@ -363,7 +393,7 @@ static void build_families(Ctx *ctx)
                 fam->rep_node = node; /* il rappresentante e' il branch locale */
         }
         /* Il tronco e' deciso dal rappresentante: una famiglia che contiene un
-         * long-lived "in coda" (per esempio uno specchio remoto) nonPromuove
+         * long-lived "in coda" (per esempio uno specchio remoto) non promuove
          * il branch locale a tronco. */
         const BranchNode *rep = node_at(ctx, fam->rep_node);
         fam->ll_rank = rep->long_lived_rank;
@@ -403,10 +433,11 @@ static void build_family_order(Ctx *ctx)
  *   genitori. Un commit su due o piu' catene non-tronco, senza un tronco che
  *   lo contenga, e' condiviso: non ha un proprietario.
  * - f(b): per una famiglia non-tronco, il primo commit scendendo dalla catena
- *   di b che e' condiviso oppure che e' la punta di un'altra famiglia (D1, D2,
- *   D6 della vecchia euristica valgono ancora, ma valgono per definizione e non
- *   per il confronto con chi e' passato prima). I tronchi non hanno un punto di
- *   diramazione: sono la base.
+ *   di b che e' condiviso oppure che e' la punta di un'altra famiglia. E' una
+ *   definizione sulla sola struttura: non dipende dal confronto con chi e'
+ *   passato prima, e le famiglie che si staccano dallo stesso commit hanno la
+ *   stessa f (sono fratelli). I tronchi non hanno un punto di diramazione:
+ *   sono la base.
  * - first_own(b): il primo commit proprio di b, cioe' il primo scendendo che
  *   nessun'altra famiglia raggiunge; se la famiglia non ha commit proprio
  *   (fast-forward, specchio lontano, alias) non ha nemmeno una base: fork

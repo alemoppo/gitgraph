@@ -80,7 +80,7 @@ static ConfigBranch g_fake[] = {
     /* nomi con caratteri che la grammatica deve non toccare */
     { "feat#1", "feat#1" },
     { "feat;x", "feat;x" },
-    /* nomi brechi, per la validazione dei riferimenti */
+    /* nomi brevi, per la validazione dei riferimenti */
     { "a", "a" },
     { "abc", "abc" },
     { "abcd", "abcd" },
@@ -484,7 +484,7 @@ static void test_refname_lengths(void)
     CHECK(!config_refname_syntax_ok("a@{0}"), "sequenza @{: non valido");
     CHECK(!config_refname_syntax_ok("a\\b"), "barra rovescia: non valido");
 
-    /* gli stessi nomi brechi passano dal percorso completo del caricamento:
+    /* gli stessi nomi brevi passano dal percorso completo del caricamento:
      * devono risultare "non esistenti" (sintassi valida), non "non validi" */
     {
         GraphConfig cfg;
@@ -497,10 +497,10 @@ static void test_refname_lengths(void)
             "abcde\n"
             "abcdef\n";
         bool ok = load_text("brevi.cfg", text, &cfg, &rep);
-        CHECK(ok, "nomi brechi: il file deve restare valido");
+        CHECK(ok, "nomi brevi: il file deve restare valido");
         CHECK(!report_has(&rep, "non e' un nome di riferimento valido"),
-              "nomi brechi: nessuno deve essere respinto come sintassi");
-        CHECK(cfg.long_lived_count == 5, "nomi brechi: tutti long-lived");
+              "nomi brevi: nessuno deve essere respinto come sintassi");
+        CHECK(cfg.long_lived_count == 5, "nomi brevi: tutti long-lived");
         config_report_free(&rep);
         config_free(&cfg);
     }

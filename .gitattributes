@@ -1,0 +1,11 @@
+# Eol per tipo di file, uguali in ogni clone:
+#   - i file di testo stanno in LF nel repository e vengono controllati in LF
+#     (commenti e stringhe sono ASCII con apostrofi; il test ctest "encoding"
+#     verifica che restino UTF-8 valido e senza mojibake);
+#   - i .bat sono CRLF, li vuole cmd.exe.
+*.bat text eol=crlf
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.cmake text eol=lf

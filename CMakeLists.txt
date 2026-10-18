@@ -110,6 +110,15 @@ set_tests_properties(invariance PROPERTIES FIXTURES_REQUIRED testrepo TIMEOUT 60
 add_test(NAME dump_smoke COMMAND gitgraph_dump "${GG_TEST_REPO}")
 set_tests_properties(dump_smoke PROPERTIES FIXTURES_REQUIRED testrepo)
 
+# Igiene dei file di testo: UTF-8 valido (regole di codifica, overlong e
+# surrogate esclusi) e nessun mojibake (i byte C3 82 / C3 83, un accento
+# letto e riscritto come se fosse Latin-1, non sono mai legittimi qui).
+# Script CMake puro, gira senza compilare e senza fixture.
+add_test(NAME encoding
+         COMMAND "${CMAKE_COMMAND}"
+                 "-DGG_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_encoding.cmake")
+
 # --- test di scala ------------------------------------------------------------
 # Due repository sintetici (vedi tests/make_scale_repo.c) con gli obiettivi di
 # progetto: ~350 riferimenti / 10.000 commit entro 3 s e ~1.100 riferimenti /
