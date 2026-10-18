@@ -7,13 +7,29 @@
 # fuori dalla build, e cancellare quel percorso cancellerebbe lontano. Il
 # controllo si fa quindi anche sul percorso reale, con i collegamenti risolti,
 # e comprende il caso normale della prima esecuzione in cui il percorso non
-# esiste ancora: una junction puo' stare su un antenato, quindi si risolve il
-# piu' profondo antenato esistente.
+# esiste ancora: una junction puo' stare su un antenato. I componenti si
+# risolvono da sinistra a destra e i ".." si valutano dopo la risoluzione; un
+# componente che non si riesce a verificare (collegamento rotto) fa rifiutare
+# il percorso invece di dichiararlo sicuro.
 #
 # In piu' ogni script dichiara il percorso ATTESO (ricavato dalla build root) e
 # il controllo pretende che il percorso da cancellare sia esattamente quello:
 # un "-D" che lo sposta altrove viene rifiutato anche se restasse sotto la
 # build.
+#
+# Confine di fiducia: gli script ricevono la build root (GG_BUILD_ROOT) e il
+# percorso da pulire (GG_*_REPO) come parametri. La guardia ricava il percorso
+# ATTESO dalla build root e da un nome scritto nel codice, non dal parametro da
+# pulire, quindi un percorso atteso contraffatto *da solo* non passa. Se invece
+# vengono alterati *tutti* i parametri (build root arbitraria e percorso da
+# pulire costruito su di essa), la guardia non ha modo di sapere quale fosse la
+# vera build del progetto: protegge dalla configurazione sbagliata e dagli
+# errori, non da chi invoca lo script con parametri scelti ad arte. Una verifica
+# piu' forte dovrebbe ancorarsi a qualcosa creato in fase di configure (per
+# esempio un marcatore scritto da CMakeLists.txt dentro la build, o un file
+# sentinella lasciato dai nostri stessi test nella directory da rimuovere) e
+# rifiutare cio' che non lo contiene: e' una proposta, non una garanzia, perche'
+# chi puo' riscrivere i parametri puo' anche ricreare il marcatore.
 #
 # Uso (script CMake, nessun progetto):
 #   include("${CMAKE_CURRENT_LIST_DIR}/cleanup_guard.cmake")
@@ -24,42 +40,69 @@
 #   file(REMOVE_RECURSE "${DIR}")
 
 # file(REAL_PATH) basta da CMake 3.19 e cmake_path da 3.20: il progetto dichiara
-# 3.20. La policy (dove esiste) decide l'ordine fra risoluzione dei collegamenti
-# e collasso dei "..": per un controllo di sicurezza serve risolvere prima.
+# 3.20. La policy CMP0152 (dove esiste) decide l'ordine fra risoluzione dei
+# collegamenti e collasso dei "..", ma da sola NON basta per un controllo di
+# sicurezza:
+#   - su Windows file(REAL_PATH) di un percorso che passa da una junction
+#     restituisce il percorso con i ".." comunque collassati, perche' e' il
+#     sistema operativo a normalizzarli prima di aprire il percorso;
+#   - una normalizzazione lessicale preliminare (get_filename_component
+#     ABSOLUTE) annulla del tutto l'effetto della policy.
+# gg_real_path risolve quindi i collegamenti PRIMA di collassare i "..",
+# componente per componente, senza dipendere dalla policy. La policy si imposta
+# comunque (NEW) come difesa in profondita' per ogni altro uso di REAL_PATH.
 if(POLICY CMP0152)
     cmake_policy(SET CMP0152 NEW)
 endif()
 
-# gg_real_path(<percorso> <out>): percorso reale, collegamenti risolti.
-# Se <percorso> non esiste si risolve il piu' profondo antenato esistente e vi
-# si riaccodano i componenti mancanti (un componente inesistente non puo'
-# essere una junction: non c'e' niente da seguire).
+# gg_real_path(<percorso assoluto> <out>): percorso reale, con i collegamenti
+# risolti e i ".." valutati *dopo* la risoluzione (semantica conservativa).
+# Il risultato e' "" se un componente non e' verificabile in modo affidabile
+# (per esempio un collegamento rotto o un percorso non assoluto): in quel caso
+# il chiamante deve rifiutare.
+#
+# Perche' non basta file(REAL_PATH) sull'intero percorso: se il percorso non
+# esiste ancora il risultato non e' affidabile, e su Windows un percorso che
+# passa da una junction puo' avere i ".." collassati lessicalmente, cioe'
+# prima della risoluzione, che e' proprio il caso da non credere. Qui si
+# percorrono i componenti da sinistra a destra: ogni componente che esiste
+# viene risolto subito (file(REAL_PATH)), un ".." toglie il padre del percorso
+# *gia' risolto*, un componente inesistente viene accodato cosi' com'e' (non
+# puo' essere un collegamento).
 function(gg_real_path path out)
-    get_filename_component(p "${path}" ABSOLUTE)
-    set(tail "")
-    while(NOT EXISTS "${p}")
-        get_filename_component(leaf "${p}" NAME)
-        get_filename_component(parent "${p}" DIRECTORY)
-        if(parent STREQUAL "${p}")
-            break() # radice raggiunta senza trovare niente: niente da risolvere
-        endif()
-        if(tail STREQUAL "")
-            set(tail "${leaf}")
-        else()
-            set(tail "${leaf}/${tail}")
-        endif()
-        set(p "${parent}")
-    endwhile()
-    if(NOT EXISTS "${p}")
-        set("${out}" "${path}" PARENT_SCOPE)
+    set("${out}" "" PARENT_SCOPE)
+    if(NOT IS_ABSOLUTE "${path}")
         return()
     endif()
-    file(REAL_PATH "${p}" base)
-    if(tail STREQUAL "")
-        set("${out}" "${base}" PARENT_SCOPE)
-    else()
-        set("${out}" "${base}/${tail}" PARENT_SCOPE)
-    endif()
+    file(TO_CMAKE_PATH "${path}" p)
+    cmake_path(GET p ROOT_PATH radice)
+    cmake_path(GET p RELATIVE_PART resto)
+    set(res "${radice}")
+    string(REPLACE "/" ";" componenti "${resto}")
+    foreach(c IN LISTS componenti)
+        if(c STREQUAL "" OR c STREQUAL ".")
+            continue()
+        elseif(c STREQUAL "..")
+            cmake_path(GET res PARENT_PATH padre)
+            set(res "${padre}")
+        else()
+            if(res MATCHES "/$")
+                set(cand "${res}${c}")
+            else()
+                set(cand "${res}/${c}")
+            endif()
+            if(EXISTS "${cand}")
+                file(REAL_PATH "${cand}" risolto)
+                set(res "${risolto}")
+            elseif(IS_SYMLINK "${cand}")
+                # collegamento rotto: non si puo' sapere dove porta
+                return()
+            else()
+                set(res "${cand}")
+            endif()
+        endif()
+    endforeach()
+    set("${out}" "${res}" PARENT_SCOPE)
 endfunction()
 
 # gg_strictly_under(<genitore> <figlio> <out>): vero se <figlio> sta *dentro*
@@ -122,6 +165,12 @@ function(gg_test_dir_is_safe path build ok reason)
 
     gg_real_path("${build}" breal)
     gg_real_path("${path}" preal)
+    if(breal STREQUAL "" OR preal STREQUAL "")
+        set("${reason}"
+            "percorso non verificabile in modo affidabile (collegamento rotto o percorso non assoluto)"
+            PARENT_SCOPE)
+        return()
+    endif()
     cmake_path(GET breal PARENT_PATH bparent)
     if(bparent STREQUAL "${breal}")
         set("${reason}"

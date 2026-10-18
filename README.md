@@ -438,7 +438,9 @@ Quattordici test, nessuno con finestra:
     scavalcano con `..`, percorsi diversi da quello atteso, prefisso simile ma
     non antenato, radice di un drive, percorsi relativi o vuoti, e percorsi che
     attraversano una **junction** (creata con `mklink /J` se l'ambiente lo
-    permette). Verifica anche che gli script veri rifiutino un `GG_*_REPO`
+    permette), anche combinata con `..` (una junction esterna seguita da `..`
+    normalizza a un percorso che *sembra* interno ma il cui percorso reale esce
+    dalla build). Verifica anche che gli script veri rifiutino un `GG_*_REPO`
     esterno senza cancellare ne' scrivere niente (lo stream `.stream` non
     compare) e che una sentinella fuori dalla build resti intatta: le directory
     esterne del test sono finte e stanno dentro la build.
@@ -474,13 +476,33 @@ il percorso atteso.
 
 Prima di ogni cancellazione o scrittura gli script passano da
 `tests/cleanup_guard.cmake`: il percorso deve essere **esattamente quello
-atteso** e, con i collegamenti risolti (`file(REAL_PATH)`, `cmake_path`), deve
-restare dentro la directory di build. Un componente che sia una junction, un
+atteso** e, con i collegamenti risolti, deve restare dentro la directory di
+build. La risoluzione e' fatta componente per componente, da sinistra a destra:
+ogni componente che esiste viene risolto subito (`file(REAL_PATH)`), un `..`
+toglie il padre del percorso **gia' risolto**. L'ordine conta: collassare i `..`
+prima di risolvere i collegamenti (come fa `get_filename_component(... ABSOLUTE)`
+e come fa il sistema operativo con una junction) accetterebbe un percorso come
+`<build>/test-repos/link/../gitgraph_test_repo`, che si scrive come interno alla
+build ma il cui percorso reale, con `link` che e' una junction verso l'esterno,
+esce dalla build. Per questo la guardia non si appoggia alla sola policy
+`CMP0152`: la risoluzione e' esplicita. Un componente che sia una junction, un
 symlink o un altro reparse point che porta fuori viene quindi rifiutato, come i
 percorsi esterni, quelli che scavalcano la build con `..`, quelli relativi e
-quelli la cui sicurezza non si puo' dimostrare. Il test `cleanup_guard` copre
-questi casi con directory finte dentro la build, e una sentinella verifica che
-nulla fuori venga toccato.
+quelli la cui sicurezza non si puo' dimostrare (per esempio un collegamento
+rotto). Il test `cleanup_guard` copre questi casi con directory finte dentro la
+build, e una sentinella verifica che nulla fuori venga toccato.
+
+**Confine di fiducia.** La guardia protegge da configurazioni sbagliate ed
+errori, non da chi invoca gli script con parametri scelti ad arte: `GG_BUILD_ROOT`
+e `GG_*_REPO` arrivano da fuori. Il percorso atteso non e' un parametro (si ricava
+dalla build root e da un nome scritto in `CMakeLists.txt`), quindi alterare solo
+il percorso da pulire non basta a farlo passare; ma se si altera anche la build
+root la guardia non ha modo di sapere quale fosse la vera build del progetto. Una
+verifica piu' forte dovrebbe ancorarsi a qualcosa creato in fase di configure
+(per esempio un marcatore scritto da `CMakeLists.txt` nella build) o a una
+sentinella lasciata dai test stessi dentro la directory da rimuovere, e
+rifiutare cio' che non la contiene; resta comunque una misura parziale, perche'
+chi puo' riscrivere i parametri puo' anche ricreare il marcatore.
 
 I percorsi possono contenere spazi e caratteri che `cmd.exe` tratta in modo
 speciale (`&` e' un separatore di comandi): i percorsi arrivano tramite variabili

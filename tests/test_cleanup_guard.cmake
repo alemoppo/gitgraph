@@ -53,6 +53,14 @@ file(MAKE_DIRECTORY "${gg_fake}/test-repos")
 file(MAKE_DIRECTORY "${gg_ext}/repo")
 file(WRITE "${gg_sent}" "dato da non cancellare\n")
 
+# bersaglio "vero" del percorso con junction + ".." (link -> esterno, poi ".."
+# sale al genitore): se quel percorso venisse accettato e cancellato finirebbe
+# qui, fuori dalla build. La sentinella resta a dimostrarlo.
+set(gg_fuori_target "${gg_sandbox}/gitgraph_test_repo")
+set(gg_sent2 "${gg_fuori_target}/bersaglio.txt")
+file(MAKE_DIRECTORY "${gg_fuori_target}")
+file(WRITE "${gg_sent2}" "dato esterno da non cancellare\n")
+
 # percorsi attesi (ricavati dalla build root come negli script veri)
 set(gg_expected_fixture "${gg_fake}/test-repos/gitgraph_test_repo")
 set(gg_expected_scale "${gg_fake}/test-repos/scale_prova")
@@ -107,6 +115,22 @@ if(gg_jrc EQUAL 0)
     gg_atteso("${gg_link}" "${gg_link}" "${gg_fake}" FALSE "la junction stessa")
     gg_atteso("${gg_link}/gitgraph_test_repo" "${gg_link}/gitgraph_test_repo"
               "${gg_fake}" FALSE "percorso non esistente dentro una junction")
+    # junction seguita da "..": il percorso scritto sembra interno alla build
+    # (link/.. si normalizza a test-repos) ma, risolvendo prima i collegamenti,
+    # il percorso reale esce dalla build. Un controllo che collassa i ".." prima
+    # di risolvere accetterebbe questo percorso: qui deve rifiutarlo.
+    gg_atteso("${gg_link}/../gitgraph_test_repo"
+              "${gg_expected_fixture}" "${gg_fake}"
+              FALSE "junction esterna + .. (scritto interno, reale esterno)")
+    gg_atteso("${gg_link}/.." "${gg_link}/.." "${gg_fake}"
+              FALSE "junction esterna + .. fino al genitore del bersaglio")
+    gg_atteso("${gg_link}/../scale_prova.stream"
+              "${gg_expected_scale}.stream" "${gg_fake}"
+              FALSE "file .stream con junction esterna + ..")
+    if(NOT EXISTS "${gg_sent2}")
+        message(FATAL_ERROR
+                "cleanup_guard: bersaglio esterno sparito dopo i verdi con junction + ..")
+    endif()
     # una junction che resta *dentro* la build non e' un problema: il percorso
     # reale resta dentro e il controllo non rifiuta i collegamenti in se'
     set(gg_dentro "${gg_fake}/test-repos/dentro")
@@ -119,6 +143,11 @@ if(gg_jrc EQUAL 0)
     if(gg_jrc2 EQUAL 0)
         gg_atteso("${gg_link2}/repo" "${gg_link2}/repo" "${gg_fake}"
                   TRUE "junction interna alla build")
+        # una junction *interna* seguita da ".." resta sicura: non si rifiuta
+        # piu' del necessario
+        gg_atteso("${gg_link2}/../gitgraph_test_repo"
+                  "${gg_link2}/../gitgraph_test_repo" "${gg_fake}"
+                  TRUE "junction interna alla build + ..")
     endif()
 else()
     message("cleanup_guard: junction non creabile in questo ambiente "
@@ -191,6 +220,9 @@ gg_unlink("${gg_link}")
 gg_unlink("${gg_fake}/test-repos/link2")
 if(NOT EXISTS "${gg_sent}")
     message(FATAL_ERROR "cleanup_guard: la sentinella e' sparita")
+endif()
+if(NOT EXISTS "${gg_sent2}")
+    message(FATAL_ERROR "cleanup_guard: il bersaglio esterno e' sparito")
 endif()
 file(REMOVE_RECURSE "${gg_sandbox}")
 if(EXISTS "${gg_sandbox}")
