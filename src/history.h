@@ -40,7 +40,10 @@ typedef enum {
 typedef enum {
     SUGGESTION_NONE,     /* nessun suggerimento (padre deciso o nessun padre) */
     SUGGESTION_DATE,     /* il candidato col primo commit proprio piu' vecchio */
-    SUGGESTION_NAME_TIE  /* a parita' di date: il nome (spareggio dichiarato) */
+    SUGGESTION_NAME_TIE, /* a parita' di date: il nome (spareggio dichiarato) */
+    SUGGESTION_ANCESTOR  /* nessun fratello piu' vecchio: il primo antenato non
+                            fratello sotto il punto di diramazione (il ramo da
+                            cui il gruppo di fratelli si e' staccato) */
 } SuggestionBasis;
 
 typedef struct {
@@ -86,10 +89,14 @@ typedef struct {
     /* Padre suggerito: valido solo con stato AMBIGUO. Non e' un padre
      * dedotto ne' certo: e' il candidato ambiguo piu' antico (col primo
      * commit proprio piu' vecchio del branch, data; a parita', il nome),
-     * dichiarato nella motivazione. Assente per il ramo piu' antico della
-     * diramazione. Il grafo dei padri suggeriti non ha cicli. Serve a
-     * piazzare il branch (tratteggiato) finche' [parents] non dichiara il
-     * padre vero. */
+     * dichiarato nella motivazione. Per il ramo piu' antico di un gruppo di
+     * fratelli, che fra i suoi fratelli non trova nessuno piu' antico, e' il
+     * primo antenato non fratello sotto il punto di diramazione (basis
+     * SUGGESTION_ANCESTOR): solo i veri radice (nessun antenato non fratello
+     * sotto il punto) restano senza suggerimento. Il grafo dei padri suggeriti
+     * non ha cicli (ogni salto scende nell'ordine data-nome, e un tronco non
+     * ha suggeritori propri). Serve a piazzare il branch (tratteggiato) finche'
+     * [parents] non dichiara il padre vero. */
     char *suggested_parent;
     SuggestionBasis suggestion_basis;
 } BranchNode;

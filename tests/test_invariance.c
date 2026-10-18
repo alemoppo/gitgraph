@@ -56,6 +56,9 @@ static int g_fail;
         }                                                                      \
     } while (0)
 
+/* proprieta' condivisa: serve la macro CHECK definita sopra */
+#include "gg_checks.h"
+
 /* ---------- descrizione del modello, per punta ---------- */
 
 static size_t tip_of(const History *h, const GitData *d, const char *name)
@@ -317,6 +320,9 @@ static void check_group(const GitData *base, const char **names, size_t n,
         /* il grafo dei padri suggeriti non deve chiudere in ciclo, in
          * nessuna permutazione */
         check_suggestions_acyclic(&hist, etichetta);
+        /* e ogni ramo con un tronco fra gli antenati deve avere un padre o
+         * un padre suggerito che arriva al tronco */
+        gg_check_trunk_ancestry(&hist, &permuted, etichetta);
         if (k == 0) {
             riferimento = desc;
             printf("%s: %zu permutazioni, modello di riferimento:\n%s", etichetta,
@@ -616,9 +622,10 @@ static bool make_mk3(const char *path, const char *p_name, const char *c_name,
 
 /* Verita' nota dei casi mk3 (regola dei fratelli): i due rami nascono dallo
  * stesso punto e nessuno contiene l'altro, quindi sono sempre ambigui
- * l'uno con l'altro, qualunque sia il nome. Il padre suggerito per data va
- * solo sul ramo col primo commit proprio piu' recente; il piu' antico della
- * diramazione resta senza suggerimento. */
+ * l'uno con l'altro, qualunque sia il nome. Il ramo piu' antico ha anche
+ * il tronco main fra i candidati (il primo antenato non fratello sotto il
+ * punto di diramazione) e lo suggerisce: nessun fratello e' piu' vecchio di
+ * lui. Il ramo nato dopo suggerisce il piu' antico del gruppo, per data. */
 static void check_mk3(const GitData *data, const char *p_name,
                       const char *c_name, bool p_piu_vecchio,
                       const char *etichetta)
@@ -652,10 +659,25 @@ static void check_mk3(const GitData *data, const char *p_name,
         CHECK(b->state == PARENT_AMBIGUOUS && b->parent == NULL,
               "%s: '%s' atteso ambiguo senza padre, trovato %s (stato %d)",
               etichetta, b->name, b->parent ? b->parent : "-", (int)b->state);
-        CHECK(b->candidate_count == 1 && b->candidates &&
-                  strcmp(b->candidates[0], altro) == 0,
-              "%s: '%s' atteso con unico candidato '%s', trovati %zu",
-              etichetta, b->name, altro, b->candidate_count);
+        bool c_altro = false, c_main = false;
+        for (size_t k = 0; k < b->candidate_count && b->candidates; k++) {
+            if (strcmp(b->candidates[k], altro) == 0)
+                c_altro = true;
+            if (strcmp(b->candidates[k], "main") == 0)
+                c_main = true;
+        }
+        if (e_prima) {
+            /* il piu' antico del gruppo: il fratello e il tronco da cui il
+             * gruppo si e' staccato (primo antenato non fratello sotto il
+             * punto), entrambi in lizza, pero' resta ambiguo */
+            CHECK(b->candidate_count == 2 && c_altro && c_main,
+                  "%s: '%s' attesi i candidati '%s' e 'main', trovati %zu",
+                  etichetta, b->name, altro, b->candidate_count);
+        } else {
+            CHECK(b->candidate_count == 1 && c_altro,
+                  "%s: '%s' atteso con unico candidato '%s', trovati %zu",
+                  etichetta, b->name, altro, b->candidate_count);
+        }
         if (e_dopo) {
             CHECK(b->suggested_parent &&
                       strcmp(b->suggested_parent, nome_nato_prima) == 0,
@@ -672,20 +694,27 @@ static void check_mk3(const GitData *data, const char *p_name,
                   "suggerimento per data: %s",
                   etichetta, b->name, b->motivation ? b->motivation : "-");
         } else {
-            CHECK(b->suggested_parent == NULL &&
-                      b->suggestion_basis == SUGGESTION_NONE,
-                  "%s: '%s' e' il piu' antico della diramazione: nessun "
-                  "suggerimento atteso (%s)",
-                  etichetta, b->name,
+            /* il piu' antico: nessun fratello vecchio, quindi suggerisce il
+             * primo antenato non fratello sotto il punto (qui il tronco main) */
+            CHECK(b->suggested_parent &&
+                      strcmp(b->suggested_parent, "main") == 0,
+                  "%s: '%s' atteso col suggerito 'main', trovato %s", etichetta,
+                  b->name,
                   b->suggested_parent ? b->suggested_parent : "-");
+            CHECK(b->suggestion_basis == SUGGESTION_ANCESTOR,
+                  "%s: '%s' base del suggerimento %d, attesa da antenato",
+                  etichetta, b->name, (int)b->suggestion_basis);
             CHECK(b->motivation &&
-                      strstr(b->motivation, "nessun padre suggerito"),
-                  "%s: '%s' motivazione senza la dichiarazione dell'assenza "
-                  "di suggerimento: %s",
+                      strstr(b->motivation,
+                             "nessun fratello piu' vecchio: padre suggerito "
+                             "'main'"),
+                  "%s: '%s' motivazione senza la dichiarazione del suggerito "
+                  "antenato: %s",
                   etichetta, b->name, b->motivation ? b->motivation : "-");
         }
     }
     check_suggestions_acyclic(&hist, etichetta);
+    gg_check_trunk_ancestry(&hist, data, etichetta);
     printf("%s: verificati '%s' e '%s' (fratelli, ambigui)\n", etichetta,
            nome_nato_prima, nome_nato_dopo);
     history_free(&hist);

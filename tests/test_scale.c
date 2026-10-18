@@ -45,6 +45,9 @@ static void fail(const char *fmt, ...)
             fail(__VA_ARGS__);                                            \
     } while (0)
 
+/* proprieta' condivisa: serve la macro CHECK definita sopra */
+#include "gg_checks.h"
+
 static double seconds_since(clock_t start)
 {
     return (double)(clock() - start) / (double)CLOCKS_PER_SEC;
@@ -246,6 +249,9 @@ int main(int argc, char **argv)
           h1.branch_count, local_branch_count(&data));
     CHECK(histories_equal(&h1, &h2), "il modello non e' deterministico");
     check_model(&h1, sub_index, deep);
+    /* invariante anche sui repo grandi: ogni ramo con un tronco fra gli
+     * antenati ha un padre o un padre suggerito che arriva al tronco */
+    gg_check_trunk_ancestry(&h1, &data, "repo di scala");
     CHECK(t_load + t_build <= budget,
           "budget superato: %.2f s > %.1f s", t_load + t_build, budget);
 

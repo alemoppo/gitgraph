@@ -82,6 +82,11 @@ typedef struct {
     size_t first_own;    /* primo commit proprio, NO_POS se assente */
     size_t *cand;        /* indici famiglia candidati */
     size_t cand_count;
+    size_t fork_cand;    /* quanti candidati stanno sul punto di diramazione;
+                            gli altri (in coda) sono antenati non fratelli,
+                            trovati sotto il punto dal ramo piu' antico di un
+                            gruppo di fratelli: elencati e suggeriti, ma non
+                            decidono lo stato */
     BitSet *inside;      /* famiglie la cui catena contiene la sua punta */
     BitSet *reach;       /* commit raggiungibili dalla punta */
 } Family;
@@ -366,6 +371,7 @@ static void build_families(Ctx *ctx)
         fam->f = NO_POS;
         fam->fork_dec = NO_POS;
         fam->first_own = NO_POS;
+        fam->fork_cand = 0;
     }
 }
 
@@ -741,6 +747,17 @@ static void compute_first_own(Ctx *ctx)
  * nessun plausibile padre (per esempio b e' una continuazione di X: la
  * condivisione e' con un ramo che si e' staccato da b) la discesa continua.
  *
+ * Eccezione: se il primo punto e' tutto di fratelli (famiglie nate lo stesso
+ * commit) e b e' il piu' antico del gruppo (primo commit proprio piu' vecchio
+ * di tutti i fratelli, strettamente: a parita' di data il nome non decide,
+ * perche' il modello non deve dipendere dai nomi), la discesa continua sotto il
+ * punto finche' non trova il primo antenato non fratello (il tronco da cui il
+ * gruppo si e' staccato, o il primo punto dove altre famiglie sono plausibili
+ * padri). Quelle famiglie finiscono in coda ai candidati: sono elencate e una
+ * puo' diventare il padre suggerito, ma non decidono lo stato (il ramo resta
+ * ambiguo: potrebbe essere figlio di un fratello). Il punto di diramazione resta
+ * quello del gruppo. Senza antenato sotto il punto il modello non cambia.
+ *
  * Scrive il punto scelto in fam->fork_dec (NO_POS se nessuno) e i candidati in
  * fam->cand; la lista e' libera e va liberata da chi chiama. */
 static void collect_candidates(Ctx *ctx, size_t bi)
@@ -749,6 +766,7 @@ static void collect_candidates(Ctx *ctx, size_t bi)
     free(b->cand);
     b->cand = NULL;
     b->cand_count = 0;
+    b->fork_cand = 0;
     b->fork_dec = NO_POS;
     if (b->tip_idx == NO_POS || b->trunk)
         return;
@@ -761,15 +779,25 @@ static void collect_candidates(Ctx *ctx, size_t bi)
     /* la punta di b non e' mai il suo punto di diramazione: b non e' nato da
      * se stesso (e la punta e' per definizione sua) */
     mark_chain(ctx, bi);
+    int64_t data_b = date_at(ctx, b->first_own);
+    bool sotto_fratelli = false; /* discesa sotto il punto di un gruppo */
     for (size_t cur = first_parent(ctx, b->tip_idx); cur != NO_POS;
          cur = first_parent(ctx, cur)) {
         if (ctx->trunk_at[cur] != NO_POS) {
-            /* un tronco possiede questo commit: e' il padre, non c'e' da
-             * confrontare nessun altro (un long-lived non si deduce) */
-            b->fork_dec = cur;
-            b->cand = xmalloc(sizeof(size_t));
-            b->cand[0] = ctx->trunk_at[cur];
-            b->cand_count = 1;
+            if (!sotto_fratelli) {
+                /* un tronco possiede questo commit: e' il padre, non c'e' da
+                 * confrontare nessun altro (un long-lived non si deduce) */
+                b->fork_dec = cur;
+                b->cand = xmalloc(sizeof(size_t));
+                b->cand[0] = ctx->trunk_at[cur];
+                b->cand_count = 1;
+                b->fork_cand = 1;
+                return;
+            }
+            /* il tronco cercato sotto il gruppo dei fratelli: si accoda come
+             * antenato, non come candidato al punto di diramazione */
+            b->cand = xrealloc(b->cand, (b->cand_count + 1) * sizeof(size_t));
+            b->cand[b->cand_count++] = ctx->trunk_at[cur];
             return;
         }
         if (peers_at(ctx, cur) < 2)
@@ -785,9 +813,37 @@ static void collect_candidates(Ctx *ctx, size_t bi)
             free(vivi);
             continue;
         }
+        if (sotto_fratelli) {
+            /* il primo punto non fratello sotto il gruppo: le famiglie che ci
+             * stanno diventano antenati in coda ai candidati */
+            b->cand = xrealloc(b->cand, (b->cand_count + n) * sizeof(size_t));
+            for (size_t k = 0; k < n; k++)
+                b->cand[b->cand_count++] = vivi[k];
+            free(vivi);
+            return;
+        }
+        /* primo punto trovato: se e' tutto fratelli e b e' il piu' antico del
+         * gruppo per data, la discesa continua sotto il punto alla ricerca del
+         * primo antenato non fratello */
+        bool tutti_fratelli = true;
+        bool piu_antico = true;
+        for (size_t k = 0; k < n; k++) {
+            const Family *c = &ctx->families[vivi[k]];
+            if (c->f != cur)
+                tutti_fratelli = false;
+            int64_t quando = (c->first_own != NO_POS) ? date_at(ctx, c->first_own)
+                                                      : date_at(ctx, c->tip_idx);
+            if (quando <= data_b)
+                piu_antico = false;
+        }
         b->fork_dec = cur;
         b->cand = vivi;
         b->cand_count = n;
+        b->fork_cand = n;
+        if (tutti_fratelli && piu_antico) {
+            sotto_fratelli = true;
+            continue; /* scende a cercare il primo antenato non fratello */
+        }
         return;
     }
 }
@@ -1026,41 +1082,47 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
             /* Scelta del padre, in ordine di precedenza:
              *  1. se il punto di diramazione e' la punta di un'altra famiglia,
              *     quella famiglia e' il padre: lo decide la struttura;
-             *  2. se un tronco (long-lived) e' fra i candidati, e' il padre:
-             *     un tronco non si deduce, e' dichiarato;
-             *  3. se un candidato ha integrato b con un merge (la punta di b
+             *  2. se un candidato ha integrato b con un merge (la punta di b
              *     sta nella sua storia), e' il padre: lo dice la struttura;
              *     vale anche se nato dallo stesso punto, perche' il merge e'
              *     un fatto;
-             *  4. se resta un solo candidato e NON e' nato dallo stesso punto
-             *     di diramazione, e' il padre "dedotto";
-             *  5. fratelli nati dallo stesso punto: sempre ambigui, anche se
+             *  3. fratelli nati dallo stesso punto: sempre ambigui, anche se
              *     il candidato e' uno solo (regola 1, dichiarata e testata
-             *     sui casi mk3);
-             *  6. se ne restano piu' di uno, nessuno e' preferibile agli
+             *     sui casi mk3). Un tronco in coda ai candidati (l'antenato
+             *     non fratello del ramo piu' antico del gruppo) non decide:
+             *     il ramo potrebbe essere figlio di un fratello;
+             *  4. se resta un solo candidato e NON e' nato dallo stesso punto
+             *     di diramazione, e' il padre "dedotto"; un tronco fra i
+             *     candidati e' il padre: un tronco non si deduce, e' dichiarato;
+             *  5. se ne restano piu' di uno, nessuno e' preferibile agli
              *     altri: stato ambiguo con l'elenco dei candidati e un
              *     suggerimento (non e' un padre dedotto: il layout lo tratta
              *     come tratteggiato finche' [parents] non dichiara il padre). */
+            /* i fratelli (candidati nati dallo stesso punto) rendono il caso
+             * ambiguo: contano solo i candidati sul punto, non gli antenati
+             * accodati sotto il punto dal ramo piu' antico del gruppo */
+            bool fratelli = false;
+            for (size_t k = 0; k < b->fork_cand; k++)
+                if (ctx->families[b->cand[k]].f == b->fork_dec)
+                    fratelli = true;
             size_t chosen = NO_POS;
             size_t tip_parent = tip_family_at(ctx, b->fork_dec);
             /* se la punta di un'altra famiglia e' il punto di diramazione, quella
              * famiglia e' il padre: lo decide la struttura. Il filtro dei
              * candidati ha gia' escluso i figli e chi sta dentro b. */
             if (tip_parent != NO_POS && tip_parent != fi) {
-                for (size_t k = 0; k < b->cand_count; k++) {
+                for (size_t k = 0; k < b->fork_cand; k++) {
                     if (b->cand[k] == tip_parent) {
                         chosen = tip_parent;
                         break;
                     }
                 }
             }
-            if (chosen == NO_POS)
-                chosen = trunk_among(ctx, b);
             /* X che integra b con un merge (b sta nella storia di X): e' il
              * padre, lo dice la struttura. Vale anche quando nasce dallo
              * stesso punto: il merge e' un fatto, i fratelli no. */
             if (chosen == NO_POS) {
-                for (size_t k = 0; k < b->cand_count; k++) {
+                for (size_t k = 0; k < b->fork_cand; k++) {
                     const Family *cf = &ctx->families[b->cand[k]];
                     if (cf->tip_idx != NO_POS &&
                         bitset_test(cf->reach, b->tip_idx)) {
@@ -1069,15 +1131,8 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                     }
                 }
             }
-            /* fratelli: un candidato nato dallo stesso punto di diramazione
-             * rende la coppia ambigua per natura, anche da solo */
-            bool fratelli = false;
-            for (size_t k = 0; k < b->cand_count; k++) {
-                if (ctx->families[b->cand[k]].f == b->fork_dec) {
-                    fratelli = true;
-                    break;
-                }
-            }
+            if (chosen == NO_POS && !fratelli)
+                chosen = trunk_among(ctx, b);
             if (chosen == NO_POS && b->cand_count == 1 && !fratelli)
                 chosen = b->cand[0]; /* un solo candidato: e' il padre dedotto */
             const char *chosen_name =
@@ -1100,12 +1155,37 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                 sb_appendf(&mot, "punto di diramazione %s sul ramo di '%s'", sh, d->parent);
             } else if (b->cand_count == 1 && chosen != NO_POS) {
                 /* un solo candidato, ma con piu' nomi locali (alias veri):
-                 * la famiglia e' il padre, il nome no */
+                 * la famiglia e' il padre, il nome no. Il padre resta
+                 * ambiguo finche' [parents] non lo dichiara, ma la genealogia
+                 * no: il nome minore fra i riferimenti diventa il suggerito
+                 * (spareggio dichiarato), cosi' un ramo con un antenato in un
+                 * tronco non resta mai senza puntamento. */
                 char *lhs = join_family_names(ctx, &chosen, 1);
+                const char *sug = NULL;
+                for (size_t k = 0; k < ctx->families[chosen].node_count; k++) {
+                    const BranchNode *n =
+                        node_at(ctx, ctx->families[chosen].nodes[k]);
+                    if (n->is_remote)
+                        continue;
+                    if (!sug || strcmp(n->name, sug) < 0)
+                        sug = n->name;
+                }
+                for (size_t k = 0; sug == NULL && k < ctx->families[chosen].node_count;
+                     k++) {
+                    const BranchNode *n =
+                        node_at(ctx, ctx->families[chosen].nodes[k]);
+                    if (!sug || strcmp(n->name, sug) < 0)
+                        sug = n->name;
+                }
                 d->state = PARENT_AMBIGUOUS;
+                d->suggested = xstrdup(sug);
+                d->basis = SUGGESTION_NAME_TIE;
                 sb_appendf(&mot,
                            "punto di diramazione %s; piu' riferimenti sulla stessa punta: %s",
                            sh, lhs);
+                append_note(&mot, "padre suggerito per nome, a parita' di "
+                                  "riferimenti sulla stessa punta");
+                sb_appendf(&mot, ": '%s'", d->suggested);
                 free(lhs);
             } else {
                 char *lhs = join_family_names(ctx, b->cand, b->cand_count);
@@ -1122,8 +1202,10 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                  * parita' il nome) e il confronto con il ramo stesso rende il
                  * suggerimento decrescente nell'ordine (data, nome), quindi la
                  * catena dei padri suggeriti non puo' chiudere in ciclo ed e'
-                 * deterministica. Per il ramo piu' antico della diramazione non
-                 * c'e' un padre da suggerire fra i candidati. */
+                 * deterministica. Gli antenati non fratelli in coda (il ramo
+                 * piu' antico di un gruppo di fratelli li ha sotto il punto di
+                 * diramazione) sono considerati solo se nessun fratello e'
+                 * eleggibile: vedi sotto. */
                 int64_t self_date = (b->first_own != NO_POS)
                                         ? date_at(ctx, b->first_own)
                                         : date_at(ctx, b->tip_idx);
@@ -1133,7 +1215,7 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                 int64_t best_date = 0;
                 const char *best_name = NULL;
                 bool name_tie = false;
-                for (size_t k = 0; k < b->cand_count; k++) {
+                for (size_t k = 0; k < b->fork_cand; k++) {
                     const Family *c = &ctx->families[b->cand[k]];
                     int64_t when = (c->first_own != NO_POS) ? date_at(ctx, c->first_own)
                                                              : date_at(ctx, c->tip_idx);
@@ -1186,6 +1268,90 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                                               ? "padre suggerito per nome, a parita' di data"
                                               : "padre suggerito per data, poco affidabile con rebase");
                     sb_appendf(&mot, ": '%s'", d->suggested);
+                } else if (b->cand_count > b->fork_cand) {
+                    /* Nessun fratello piu' vecchio: il ramo e' il piu' antico
+                     * del gruppo e sotto il punto di diramazione e' stato
+                     * trovato il primo antenato non fratello (il ramo da cui
+                     * il gruppo si e' staccato). Quello diventa il suggerito:
+                     * il ramo resta ambiguo (un fratello potrebbe essere il
+                     * vero padre), ma non resta senza puntamento. Un tronco si
+                     * puo' suggerire sempre (non ha suggeritori propri, la
+                     * catena finisce li'); un antenato non tronco solo se e'
+                     * piu' antico di b nell'ordine (data, nome): e' lo stesso
+                     * ordine decrescente usato per i fratelli, quindi la catena
+                     * dei suggeriti continua a scendere e non puo' chiudere in
+                     * ciclo, nemmeno con date bugiarde. */
+                    size_t best_a = NO_POS;
+                    int64_t best_a_date = 0;
+                    const char *best_a_name = NULL;
+                    bool a_tie = false;
+                    for (size_t k = b->fork_cand; k < b->cand_count; k++) {
+                        const Family *c = &ctx->families[b->cand[k]];
+                        int64_t quando = (c->first_own != NO_POS)
+                                             ? date_at(ctx, c->first_own)
+                                             : date_at(ctx, c->tip_idx);
+                        const char *cn =
+                            ctx->out->branches[c->rep_node].name;
+                        if (!c->trunk) {
+                            bool valido;
+                            if (quando != self_date)
+                                valido = (quando < self_date);
+                            else
+                                valido = (strcmp(cn, self_name) < 0);
+                            if (!valido)
+                                continue;
+                        }
+                        bool meglio;
+                        if (best_a == NO_POS) {
+                            meglio = true;
+                        } else if (quando != best_a_date) {
+                            meglio = (quando < best_a_date);
+                            if (!meglio)
+                                continue;
+                            a_tie = false;
+                        } else {
+                            int cmp = strcmp(cn, best_a_name);
+                            if (cmp < 0) {
+                                meglio = true;
+                            } else {
+                                meglio = false;
+                                if (cmp == 0)
+                                    continue;
+                            }
+                            a_tie = true;
+                        }
+                        if (meglio) {
+                            best_a = b->cand[k];
+                            best_a_date = quando;
+                            best_a_name = cn;
+                        }
+                    }
+                    if (best_a == NO_POS) {
+                        append_note(&mot,
+                                    "nessun padre suggerito: il ramo e' il piu' "
+                                    "antico della diramazione; il padre si "
+                                    "dichiara in [parents]");
+                    } else {
+                        const char *sug =
+                            family_local_name(ctx, &ctx->families[best_a]);
+                        if (!sug)
+                            sug = ctx->out->branches[ctx->families[best_a].rep_node].name;
+                        d->suggested = xstrdup(sug);
+                        char nota[512];
+                        if (a_tie) {
+                            d->basis = SUGGESTION_NAME_TIE;
+                            snprintf(nota, sizeof nota,
+                                     "nessun fratello piu' vecchio: padre suggerito "
+                                     "per nome, a parita' di data: '%s'",
+                                     d->suggested);
+                        } else {
+                            d->basis = SUGGESTION_ANCESTOR;
+                            snprintf(nota, sizeof nota,
+                                     "nessun fratello piu' vecchio: padre suggerito '%s'",
+                                     d->suggested);
+                        }
+                        append_note(&mot, nota);
+                    }
                 } else {
                     append_note(&mot,
                                 "nessun padre suggerito: il ramo e' il piu' antico "

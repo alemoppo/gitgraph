@@ -58,6 +58,9 @@ static int g_fail = 0;
         g_pass++;                                                       \
     } while (0)
 
+/* proprieta' condivisa: serve la macro CHECK definita sopra */
+#include "gg_checks.h"
+
 static char g_work[512];
 static const char *g_repo = NULL;
 
@@ -880,17 +883,33 @@ static void test_end_to_end(void)
           "main: nessun fork ne' candidati");
 
     /* branch1, senza l'ordine di nascita, e' ambiguo con branch2 (fratelli
-     * sul commit B2) e non ha piu' main come padre dedotto; il resto del
-     * modello non cambia: branch2 resta ambiguo con suggerito per data
-     * branch1, come nel test core */
+     * sul commit B2) e non ha piu' main come padre dedotto: main resta pero'
+     * fra i candidati come primo antenato non fratello sotto il punto (branch1
+     * e' il piu' antico della diramazione) e diventa il padre suggerito. Il
+     * resto del modello non cambia: branch2 resta ambiguo con suggerito per
+     * data branch1, come nel test core */
     const BranchNode *b1 = branch_named(&hist, "branch1");
     REQUIRE(b1 != NULL, "branch1 assente");
+    bool b1_c_b2 = false, b1_c_main = false;
+    for (size_t k = 0; k < b1->candidate_count && b1->candidates; k++) {
+        if (strcmp(b1->candidates[k], "branch2") == 0)
+            b1_c_b2 = true;
+        if (strcmp(b1->candidates[k], "main") == 0)
+            b1_c_main = true;
+    }
     CHECK(b1->state == PARENT_AMBIGUOUS && b1->parent == NULL &&
-              b1->candidate_count == 1 && b1->candidates &&
-              strcmp(b1->candidates[0], "branch2") == 0,
-          "branch1: atteso ambiguo con solo branch2 in lizza (padre %s, "
+              b1->candidate_count == 2 && b1_c_b2 && b1_c_main,
+          "branch1: atteso ambiguo con branch2 e main in lizza (padre %s, "
           "candidati %zu)",
           b1->parent ? b1->parent : "-", b1->candidate_count);
+    CHECK(b1->suggested_parent && strcmp(b1->suggested_parent, "main") == 0 &&
+              b1->suggestion_basis == SUGGESTION_ANCESTOR,
+          "branch1: suggerito atteso main (antenato), trovato %s (base %d)",
+          b1->suggested_parent ? b1->suggested_parent : "-",
+          (int)b1->suggestion_basis);
+    /* invariante: ogni ramo con un tronco fra gli antenati ha un padre o un
+     * padre suggerito che arriva al tronco */
+    gg_check_trunk_ancestry(&hist, &data, "end-to-end con graph.cfg");
     const BranchNode *b2 = branch_named(&hist, "branch2");
     REQUIRE(b2 != NULL, "branch2 assente");
     /* branch2 e' nato da B2, che sta sulla catena di branch1 e anche su quella

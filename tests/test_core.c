@@ -49,6 +49,9 @@ static int g_fail = 0;
         }                                                               \
     } while (0)
 
+/* proprieta' condivisa: serve la macro CHECK definita sopra */
+#include "gg_checks.h"
+
 /* ---------- helper di ricerca ---------- */
 
 static size_t commit_with_prefix(const GitData *d, const char *prefix)
@@ -338,9 +341,13 @@ static int test_history_default(const GitData *data)
      * branch2) e la struttura non dice chi e' nato prima: con l'ordine di
      * nascita non disponibile, i due sono fratelli per natura (regola 1) e il
      * punto di diramazione di branch1 si ferma a B2, dove resta in lizza solo
-     * branch2 (sp e' nato piu' in alto, su B3). Nessun padre: lo stato e'
-     * ambiguo con un solo candidato e il primo commit proprio e' il piu'
-     * vecchio sopra il fork, B3. */
+     * branch2 (sp e' nato piu' in alto, su B3, e sotto il punto resta un
+     * figlio escluso). branch1 e' pero' il piu' antico della diramazione
+     * (B3 precede C1): la discesa sotto il punto continua fino al tronco
+     * main, il primo antenato non fratello, che si aggiunge ai candidati e
+     * diventa il padre suggerito. Lo stato resta ambiguo (un fratello
+     * potrebbe essere il vero padre) e main non si deduce perche' non sta
+     * sul punto di diramazione. */
     const BranchNode *b1 = branch_named(&hist, "branch1");
     REQUIRE(b1 != NULL, "branch1 assente");
     CHECK(b1->state == PARENT_AMBIGUOUS && b1->parent == NULL,
@@ -351,19 +358,25 @@ static int test_history_default(const GitData *data)
     CHECK(b1->first_own_commit && b3h &&
               strcmp(b1->first_own_commit, b3h) == 0,
           "branch1: primo commit proprio atteso B3");
-    CHECK(b1->candidate_count == 1 && candidates_contain(b1, "branch2"),
-          "branch1: candidato atteso branch2, trovati %zu",
+    CHECK(b1->candidate_count == 2 && candidates_contain(b1, "branch2") &&
+              candidates_contain(b1, "main"),
+          "branch1: candidati attesi branch2 e main (antenato sotto il "
+          "punto), trovati %zu",
           b1->candidate_count);
-    CHECK(!candidates_contain(b1, "main") && !candidates_contain(b1, "sp"),
-          "branch1: main e sp non possono essere candidati qui (la discesa si "
-          "ferma al primo punto con un plausibile padre)");
-    CHECK(b1->suggested_parent == NULL && b1->suggestion_basis == SUGGESTION_NONE,
-          "branch1: e' il ramo piu' antico della diramazione, nessun "
-          "suggerimento atteso (%s)",
+    CHECK(!candidates_contain(b1, "sp"),
+          "branch1: sp non puo' essere candidato qui (sotto il punto e' un "
+          "figlio escluso, la discesa va verso il tronco)");
+    CHECK(b1->suggested_parent && strcmp(b1->suggested_parent, "main") == 0,
+          "branch1: padre suggerito %s, atteso main (primo antenato non "
+          "fratello)",
           b1->suggested_parent ? b1->suggested_parent : "-");
-    CHECK(b1->motivation && strstr(b1->motivation, "nessun padre suggerito"),
-          "branch1: la motivazione deve dichiarare che non c'e' un padre "
-          "suggerito: %s",
+    CHECK(b1->suggestion_basis == SUGGESTION_ANCESTOR,
+          "branch1: base del suggerimento %d, attesa SUGGESTION_ANCESTOR",
+          (int)b1->suggestion_basis);
+    CHECK(b1->motivation &&
+              strstr(b1->motivation,
+                     "nessun fratello piu' vecchio: padre suggerito 'main'"),
+          "branch1: la motivazione deve dichiarare il suggerito antenato: %s",
           b1->motivation ? b1->motivation : "-");
 
     /* branch2: diramato da B2 lungo branch1 */
@@ -425,6 +438,16 @@ static int test_history_default(const GitData *data)
     CHECK(candidates_contain(ac, "amb1") && candidates_contain(ac, "amb2") &&
               candidates_contain(ac, "ambbase"),
           "ambchild: candidati inattesi");
+    /* la famiglia padre e' unica, ma i nomi no: il suggerimento per nome
+     * (spareggio dichiarato) tiene il ramo puntato anche senza [parents] */
+    CHECK(ac->suggested_parent && ac->suggestion_basis == SUGGESTION_NAME_TIE,
+          "ambchild: suggerito per nome atteso, trovato %s (base %d)",
+          ac->suggested_parent ? ac->suggested_parent : "-",
+          (int)ac->suggestion_basis);
+    CHECK(ac->motivation &&
+              strstr(ac->motivation, "padre suggerito per nome"),
+          "ambchild: la motivazione deve dichiarare il suggerimento per nome: %s",
+          ac->motivation ? ac->motivation : "-");
 
     const char *amb[] = {"amb1", "amb2", "ambbase"};
     const char *ah = hash_of(data, "A:");
@@ -515,6 +538,11 @@ static int test_history_default(const GitData *data)
           "oA: la motivazione deve dichiarare che non c'e' un padre"
           " suggerito: %s",
           oa->motivation ? oa->motivation : "-");
+
+    /* invariante della genealogia: ogni ramo con un tronco fra gli antenati
+     * (main e' il tronco implicito) ha un padre o un padre suggerito, e la
+     * catena dei suggeriti arriva a genealogia risolta senza cicli */
+    gg_check_trunk_ancestry(&hist, data, "fixture principale");
 
     /* --- riferimenti locali e remote-tracking con punte diverse -------------- */
     /* origin/branch1 punta allo stesso commit di branch1: specchio provato */
