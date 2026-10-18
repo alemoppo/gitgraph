@@ -134,11 +134,19 @@ static size_t uf_find(size_t *uf, size_t x)
     return x;
 }
 
+/* Proprietario del commit: senza rami (owners == NULL) ogni commit e' senza
+ * proprietario, quindi tutte le catene sono anonime. */
+static size_t anon_owner(const size_t *owners, size_t ci)
+{
+    return owners ? owners[ci] : NO_IDX;
+}
+
 /* Raggruppa i commit senza proprietario in catene (componenti connesse dai
  * primi genitori) e assegna le corsie del blocco anonimo con colorazione di
  * intervalli, in ordine di riga. Riempie lane_of[ci] con la corsia relativa al
  * blocco (indice 0..n-1) per i commit anonimi, NO_IDX per gli altri, e ritorna
- * il numero di corsie usate.
+ * il numero di corsie usate. `owners` puo' essere NULL (nessun ramo): in quel
+ * caso ogni commit e' anonimo.
  *
  * Complessita': O(commit + catene * corsie). Le catene anonime sono rare (un
  * ramo cancellato dopo il merge) e le corsie del blocco restano poche, quindi
@@ -148,11 +156,11 @@ static size_t anon_chain_lanes(const GitData *d, size_t cc, const size_t *owners
 {
     for (size_t ci = 0; ci < cc; ci++)
         lane_of[ci] = NO_IDX;
-    if (!d || !owners || cc == 0)
+    if (!d || cc == 0)
         return 0;
     bool any = false;
     for (size_t ci = 0; ci < cc && !any; ci++)
-        if (owners[ci] == NO_IDX)
+        if (anon_owner(owners, ci) == NO_IDX)
             any = true;
     if (!any)
         return 0;
@@ -162,10 +170,10 @@ static size_t anon_chain_lanes(const GitData *d, size_t cc, const size_t *owners
     for (size_t ci = 0; ci < cc; ci++)
         uf[ci] = ci;
     for (size_t ci = 0; ci < cc; ci++) {
-        if (owners[ci] != NO_IDX || d->commits[ci].parent_count == 0)
+        if (anon_owner(owners, ci) != NO_IDX || d->commits[ci].parent_count == 0)
             continue;
         size_t p = d->commits[ci].parent_idx[0];
-        if (p == NO_IDX || p >= cc || owners[p] != NO_IDX)
+        if (p == NO_IDX || p >= cc || anon_owner(owners, p) != NO_IDX)
             continue;
         size_t a = uf_find(uf, ci);
         size_t b = uf_find(uf, p);
@@ -182,7 +190,7 @@ static size_t anon_chain_lanes(const GitData *d, size_t cc, const size_t *owners
         slot[ci] = NO_IDX;
     size_t nch = 0;
     for (size_t ci = 0; ci < cc; ci++) {
-        if (owners[ci] != NO_IDX)
+        if (anon_owner(owners, ci) != NO_IDX)
             continue;
         size_t r = uf_find(uf, ci);
         if (slot[r] == NO_IDX) {
@@ -227,7 +235,7 @@ static size_t anon_chain_lanes(const GitData *d, size_t cc, const size_t *owners
         c->lane = lane;
     }
     for (size_t ci = 0; ci < cc; ci++) {
-        if (owners[ci] != NO_IDX)
+        if (anon_owner(owners, ci) != NO_IDX)
             continue;
         lane_of[ci] = ch[slot[uf_find(uf, ci)]].lane;
     }
@@ -249,7 +257,10 @@ void layout_build(Layout *out, const History *h)
     out->rows = h->data ? h->data->commit_count : 0;
     out->node_count = n;
     out->nodes = xcalloc(n ? n : 1, sizeof(LayoutNode));
-    if (n == 0)
+    /* Senza rami il layout dei commit si costruisce comunque: la storia puo'
+     * essere raggiungibile solo tramite tag (nessun riferimento locale o
+     * remoto). Si torna subito solo quando non c'e' nemmeno un commit. */
+    if (n == 0 && out->rows == 0)
         return;
 
     size_t cc = out->rows;

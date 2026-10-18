@@ -33,7 +33,10 @@
  *
  * COMMIT. Oltre ai nodi-branch, la disposizione assegna una RIGA e una CORSIA
  * a ogni commit del log: la riga e' la sua posizione topologica, la corsia e'
- * quella del ramo proprietario (History.commit_owner).
+ * quella del ramo proprietario (History.commit_owner). Senza rami (nessun
+ * riferimento locale o remoto, per esempio una storia raggiungibile solo
+ * tramite tag) non ci sono nodi-branch, ma i commit restano nel layout: sono
+ * tutti anonimi.
  *
  * CORSIE ANONIME. I commit che nessun ramo reclama (la catena di un ramo
  * sparito dopo un merge) sono raggruppati in CATENE: componenti connesse di

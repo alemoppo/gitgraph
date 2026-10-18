@@ -28,6 +28,10 @@
  *    con 30 rami creati, mergiati e cancellati in sequenza una sola corsia;
  *  - un modello artificiale con un ciclo di paternita': le famiglie che la
  *    visita in profondita' non raggiunge ricevono comunque una corsia;
+ *  - una storia raggiungibile solo tramite tag (nessun branch locale o remoto):
+ *    le celle dei commit e gli archi si costruiscono comunque, tutti i commit
+ *    anonimi in una corsia; un modello senza rami e senza commit resta vuoto e
+ *    layout_free lo rilascia;
  *  - determinismo: due costruzioni successive identiche.
  *
  * La proprieta' condivisa gg_check_layout ripete le regole su ogni modello
@@ -583,6 +587,99 @@ static void check_xy_repo(const char *repo)
     free_layout(&data, &cfg, &hist, &lay);
 }
 
+/* main A, B; tag v1 su B; poi HEAD staccato e l'unico ramo cancellato: la
+ * storia resta raggiungibile solo tramite il tag, nessun branch locale o
+ * remoto. Il layout dei commit si costruisce comunque (tutti anonimi). */
+static bool make_tag_only_repo(const char *path, char *err, size_t err_size)
+{
+    back_to(g_work);
+    remove_tree(path);
+    CreateDirectoryA(path, NULL);
+    const char *init[] = {"init", "-b", "main", "-q", NULL};
+    if (!run_git(path, init, err, err_size))
+        return false;
+    long long t = 1775000000;
+    if (!commit_at(path, t, "A", err, err_size) ||
+        !commit_at(path, t + 60, "B", err, err_size))
+        return false;
+    const char *tag[] = {"tag", "v1", NULL};
+    if (!run_git(path, tag, err, err_size))
+        return false;
+    /* stacca HEAD e cancella l'unico ramo: restano solo i tag */
+    const char *detach[] = {"checkout", "-q", "--detach", NULL};
+    if (!run_git(path, detach, err, err_size))
+        return false;
+    const char *del[] = {"branch", "-D", "main", NULL};
+    return run_git(path, del, err, err_size);
+}
+
+static void check_tag_only(const char *repo)
+{
+    GitData data;
+    GraphConfig cfg;
+    History hist;
+    Layout lay;
+    if (!build_layout(repo, &data, &cfg, &hist, &lay))
+        return;
+
+    CHECK(hist.branch_count == 0, "solo tag: %zu branch, attesi 0",
+          hist.branch_count);
+    gg_check_layout(&lay, &hist, "solo tag");
+
+    CHECK(data.commit_count >= 2, "solo tag: %zu commit, attesi almeno 2",
+          data.commit_count);
+    CHECK(lay.node_count == 0, "solo tag: %zu nodi, attesi 0", lay.node_count);
+    CHECK(lay.rows == data.commit_count, "solo tag: righe %zu, commit %zu",
+          lay.rows, data.commit_count);
+    CHECK(lay.commit_count == data.commit_count,
+          "solo tag: celle %zu, commit %zu", lay.commit_count,
+          data.commit_count);
+    /* nessun ramo: i commit sono tutti anonimi, una sola catena lineare */
+    CHECK(lay.lanes == 1 && lay.anon_lane == 0 && lay.anon_lane_count == 1,
+          "solo tag: %zu corsie (anonime %zu..%zu), attesa 1 sola corsia "
+          "anonima in 0",
+          lay.lanes, lay.anon_lane, lay.anon_lane_count);
+
+    size_t a = commit_subject(&data, "A");
+    size_t b = commit_subject(&data, "B");
+    bool celle = lay.commits != NULL && lay.commit_count == data.commit_count;
+    CHECK(celle, "solo tag: celle dei commit assenti o incomplete (%zu su %zu)",
+          lay.commit_count, data.commit_count);
+    CHECK(a != NO_TIP && b != NO_TIP, "solo tag: commit A o B assente");
+    if (a != NO_TIP && b != NO_TIP && celle) {
+        CHECK(lay.commits[a].owner == NO_TIP && lay.commits[b].owner == NO_TIP,
+              "solo tag: un commit ha un proprietario");
+        CHECK(lay.commits[a].lane == 0 && lay.commits[b].lane == 0,
+              "solo tag: A in corsia %zu e B in corsia %zu, attese 0",
+              lay.commits[a].lane, lay.commits[b].lane);
+        CHECK(lay.commits[b].row == 0 && lay.commits[a].row == 1,
+              "solo tag: righe A=%zu B=%zu, attese A=1 B=0",
+              lay.commits[a].row, lay.commits[b].row);
+        CHECK(cedge_exists(&lay, b, a, LAYOUT_CEDGE_FIRST_PARENT),
+              "solo tag: manca l'arco B -> A di primo genitore");
+    }
+    printf("solo tag: %zu commit, %zu corsie, %zu archi tra commit\n",
+           lay.commit_count, lay.lanes, lay.cedge_count);
+
+    free_layout(&data, &cfg, &hist, &lay);
+}
+
+/* Un modello senza rami e senza commit: il ritorno immediato deve restare e
+ * layout_free deve poterlo rilasciare (nessun puntatore da liberare). */
+static void check_empty_layout(void)
+{
+    History h;
+    memset(&h, 0, sizeof h);
+    Layout lay;
+    layout_build(&lay, &h);
+    CHECK(lay.node_count == 0 && lay.commit_count == 0 && lay.lanes == 0,
+          "vuoto: nodi %zu, commit %zu, corsie %zu", lay.node_count,
+          lay.commit_count, lay.lanes);
+    CHECK(lay.anon_lane == NO_TIP && lay.commits == NULL,
+          "vuoto: nessun blocco anonimo atteso");
+    layout_free(&lay);
+}
+
 /* main A; n rami b1..bn, ognuno creato dalla punta corrente di main con un
  * commit, poi mergiato --no-ff e cancellato. Gli n commit restano anonimi ma i
  * loro intervalli non si sovrappongono: una sola corsia anonima. */
@@ -704,8 +801,9 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    /* il modello artificiale non ha bisogno di un repository */
+    /* i modelli artificiali non hanno bisogno di un repository */
     check_unassigned_families();
+    check_empty_layout();
 
     GitData data;
     char err[1024];
@@ -1073,6 +1171,14 @@ int main(int argc, char **argv)
     REQUIRE(make_many_deleted_repo(path, 30, err, sizeof err),
             "creazione del repo con 30 rami fallita");
     check_many_deleted(path, 30);
+    back_to(g_work);
+    remove_tree(path);
+
+    /* storia raggiungibile solo tramite tag: nessun branch locale o remoto */
+    snprintf(path, sizeof path, "%s\\gg_layout_tagonly", root);
+    REQUIRE(make_tag_only_repo(path, err, sizeof err),
+            "creazione del repo con solo tag fallita");
+    check_tag_only(path);
     back_to(g_work);
     remove_tree(path);
 

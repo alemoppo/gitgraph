@@ -39,7 +39,7 @@ non c'è un porting per Linux/macOS e il tentativo di compilare altrove viene
 fermato subito da CMake con un messaggio esplicito.
 
 - Windows con Git nel PATH.
-- Un compilatore C11 e CMake >= 3.16.
+- Un compilatore C11 e CMake >= 3.20.
 - Per la GUI (dalle fasi successive): SDL3 e SDL3_ttf.
 
 ### MSYS2 UCRT64 (configurazione verificata)
@@ -335,10 +335,11 @@ e gli archi tra commit.
 
     ctest --test-dir build --output-on-failure
 
-Tredici test, nessuno con finestra:
+Quattordici test, nessuno con finestra:
 
-1. `make_test_repo` genera il repository di prova (la fixture rimuove prima il
-   solo percorso `<build>/test-repos/gitgraph_test_repo`);
+1. `make_test_repo` genera il repository di prova (la fixture rimuove prima,
+   dopo il controllo di `tests/cleanup_guard.cmake`, il solo percorso atteso
+   `<build>/test-repos/gitgraph_test_repo`);
 2. `core` verifica parsing, topologia, modello dei branch, alias, motivazioni
    (in particolare il padre suggerito e la motivazione che lo dichiara),
    override, long-lived, determinismo, quoting degli argomenti,
@@ -388,7 +389,11 @@ Tredici test, nessuno con finestra:
    repository con due rami cancellati che si sovrappongono (`x`, `y`) piu' un
    terzo (`z`) creato dopo i merge verifica che le catene stiano in due corsie
    anonime (X e Y distinte, Z riusa), e su uno con 30 rami creati, mergiati e
-   cancellati in sequenza che basti **una sola** corsia anonima. Infine un
+   cancellati in sequenza che basti **una sola** corsia anonima. Su una storia
+   raggiungibile **solo tramite tag** (nessun branch locale o remoto) verifica
+   che le celle dei commit e gli archi si costruiscano comunque, con tutti i
+   commit anonimi in una corsia, e che un modello senza rami e senza commit
+   resti vuoto (e `layout_free` lo rilasci). Infine un
    modello artificiale con un ciclo di paternita' verifica che le famiglie che
    la visita in profondita' non raggiunge ricevano comunque una corsia. Le
    stesse regole (compresa la proprieta' che nessun arco passi sopra il nodo di
@@ -427,7 +432,16 @@ Tredici test, nessuno con finestra:
    controllo delle relazioni circolari e l'ordinamento dei padri;
 10. `encoding` verifica che i file in `src/` e `tests/` siano **ASCII**: fallisce
     se un file contiene un byte oltre `0x7F` (quindi anche i byte `C3 82` /
-    `C3 83` del mojibake). Script CMake puro, senza compilare.
+    `C3 83` del mojibake). Script CMake puro, senza compilare;
+11. `cleanup_guard` prova la protezione della pulizia
+    (`tests/cleanup_guard.cmake`): percorsi esterni alla build, percorsi che la
+    scavalcano con `..`, percorsi diversi da quello atteso, prefisso simile ma
+    non antenato, radice di un drive, percorsi relativi o vuoti, e percorsi che
+    attraversano una **junction** (creata con `mklink /J` se l'ambiente lo
+    permette). Verifica anche che gli script veri rifiutino un `GG_*_REPO`
+    esterno senza cancellare ne' scrivere niente (lo stream `.stream` non
+    compare) e che una sentinella fuori dalla build resti intatta: le directory
+    esterne del test sono finte e stanno dentro la build.
 
 I repository di scala sono sintetici e deterministici: `tests/make_scale_repo.c`
 genera su stdout uno stream per `git fast-import` (commit su `main`, un
@@ -453,12 +467,20 @@ Lo script `make_test_repo.bat` crea il repository e **non cancella mai nulla**:
 se la directory di destinazione non esiste o e' vuota la usa, altrimenti esce
 con errore. La pulizia prima di ogni esecuzione la fa CMake
 (`tests/make_test_repo_fixture.cmake`), che rimuove con `file(REMOVE_RECURSE ...)`
-il solo percorso `<build>/test-repos/gitgraph_test_repo` (scritto in
-`CMakeLists.txt`). Anche i repository di scala stanno sotto `<build>/test-repos/`
-e la loro pulizia cancella solo il percorso indicato. Non c'e' nessun controllo
-di giunzioni: si cancella solo una cartella di test dentro la directory di
-build, con un percorso noto, e CMake non segue i collegamenti in
-`REMOVE_RECURSE`.
+il solo percorso atteso `<build>/test-repos/gitgraph_test_repo` (ricavato dalla
+directory di build in `CMakeLists.txt`). Anche i repository di scala stanno sotto
+`<build>/test-repos/` e la loro pulizia (repository e file `.stream`) tocca solo
+il percorso atteso.
+
+Prima di ogni cancellazione o scrittura gli script passano da
+`tests/cleanup_guard.cmake`: il percorso deve essere **esattamente quello
+atteso** e, con i collegamenti risolti (`file(REAL_PATH)`, `cmake_path`), deve
+restare dentro la directory di build. Un componente che sia una junction, un
+symlink o un altro reparse point che porta fuori viene quindi rifiutato, come i
+percorsi esterni, quelli che scavalcano la build con `..`, quelli relativi e
+quelli la cui sicurezza non si puo' dimostrare. Il test `cleanup_guard` copre
+questi casi con directory finte dentro la build, e una sentinella verifica che
+nulla fuori venga toccato.
 
 I percorsi possono contenere spazi e caratteri che `cmd.exe` tratta in modo
 speciale (`&` e' un separatore di comandi): i percorsi arrivano tramite variabili

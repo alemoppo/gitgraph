@@ -358,6 +358,9 @@ static void gg_check_layout(const Layout *l, const History *h, const char *etich
     CHECK(l->commit_count == d->commit_count,
           "%s: layout con %zu commit per %zu nel log", etichetta,
           l->commit_count, d->commit_count);
+    if (!l->commits)
+        return; /* celle assenti: il layout dei commit e' rotto, niente da
+                   controllare oltre (evita di dereferenziare) */
     size_t fp_attesi = 0, mp_attesi = 0, br_attesi = 0;
     for (size_t ci = 0; ci < d->commit_count; ci++) {
         const GitCommit *gc = &d->commits[ci];
