@@ -36,7 +36,7 @@ non c'è un porting per Linux/macOS e il tentativo di compilare altrove viene
 fermato subito da CMake con un messaggio esplicito.
 
 - Windows con Git nel PATH.
-- Un compilatore C11 e CMake >= 3.16.
+- Un compilatore C11 e CMake >= 3.20.
 - Per la GUI (dalle fasi successive): SDL3 e SDL3_ttf.
 
 ### MSYS2 UCRT64 (configurazione verificata)
@@ -182,7 +182,11 @@ archi). `--full` mostra i messaggi di commit completi.
   e' la punta di un'altra famiglia, quella famiglia e' il padre (lo decide la
   struttura); se un candidato ha integrato il branch con un merge (la punta del
   branch sta nella sua storia), e' il padre (lo dice la struttura; vale anche se
-  e' nato dallo stesso punto, perche' il merge e' un fatto); se fra i candidati
+  e' nato dallo stesso punto, perche' il merge e' un fatto), ma **solo se la
+  prova identifica un unico candidato**: con piu' candidati che hanno integrato
+  il branch la struttura non distingue e non si sceglie il primo trovato
+  (l'ordine dei riferimenti non e' un fatto di Git), quindi si prosegue con le
+  regole seguenti; se fra i candidati
   c'e' un tronco, e' il padre (un long-lived non si deduce, e' dichiarato); se
   resta un solo candidato, e' il padre dedotto. Il tronco e il candidato unico
   decidono pero' solo quando sul punto non ci sono fratelli. Due rami nati
@@ -190,6 +194,8 @@ archi). `--full` mostra i messaggi di commit completi.
   contenente l'altro) sono sempre `ambigui` l'uno con l'altro, anche se il
   candidato e' uno solo: senza ordine di nascita la struttura non distingue
   chi e' nato prima, e l'unico modo per dirlo e' dichiararlo in `[parents]`.
+  Il test `invariance` copre anche il caso di due candidati che hanno integrato
+  lo stesso branch con un merge: resta `ambiguo` e la motivazione lo dichiara.
 - **Padre suggerito** (`suggested_parent`, `suggestion_basis`): nei casi
   ambigui il modello indica un suggerimento, **non** un padre: non e' uno stato
   "certo" ne' "dedotto". Il criterio e' documentato e verificato dal test: fra
@@ -285,7 +291,7 @@ recente), piu' gli archi.
 
     ctest --test-dir build --output-on-failure
 
-Tredici test, nessuno con finestra:
+Quindici test, nessuno con finestra:
 
 1. `make_test_repo` genera il repository di prova (la fixture rimuove prima la
    cartella dei repository di test, dentro la build);
@@ -300,7 +306,10 @@ Tredici test, nessuno con finestra:
    del drive senza barra replicata, `.` e le voci relative senza candidato),
    cattura di stdout/stderr senza blocco (pipe riempite oltre la capacità,
    entrambe le pipe attive contemporaneamente, uscita non zero e fallimento
-   della creazione dei thread di lettura) e sicurezza della ricerca di git:
+   della creazione dei thread di lettura), conversione dei percorsi UTF-16 in
+   UTF-8 (un percorso non ASCII che in UTF-8 supera `MAX_PATH` byte non viene
+   troncato: la lunghezza necessaria e' dichiarata e il buffer e' dimensionato
+   sul caso peggiore) e sicurezza della ricerca di git:
    un `git.exe` finto nella directory corrente non deve mai essere eseguito al
    posto del vero;
 3. `config` verifica `graph.cfg`: sezioni, commenti su righe dedicate, `#` e
@@ -333,7 +342,12 @@ Tredici test, nessuno con finestra:
    stesso commit, anche con tutti i commit alla stessa ora, come nei repository
    generati in blocco) e li rimuove alla fine. L'unica cosa che non viene
    confrontata e' lo spareggio dichiarato sul nome a parita' di date: li' si
-   verifica la base dello spareggio, non la scelta.
+   verifica la base dello spareggio, non la scelta. Per il caso di **due
+   candidati che hanno integrato lo stesso branch con un merge** costruisce un
+   repository dedicato e confronta, oltre a tutte le permutazioni dei nomi,
+   anche tre ordini diversi dell'array dei riferimenti (identita', invertito,
+   ruotato): lo stato deve restare `ambiguo` senza padre, con entrambi i
+   candidati e la motivazione che dichiara il merge;
 7. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
    3 s;
 8. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
@@ -347,7 +361,24 @@ Tredici test, nessuno con finestra:
     entrambi gli ordini): tutti devono risultare `ambigui` con l'altro come
     unico candidato e un solo padre suggerito per data;
 11. `encoding` verifica che i file di testo siano UTF-8 validi e senza mojibake
-    (script CMake, senza compilare).
+    (script CMake, senza compilare). Il validatore e' in
+    `tests/utf8_check.cmake`; la coda del file e' controllata davvero: una
+    sequenza incompleta o un byte non valido negli ultimi 1-3 byte viene
+    rifiutato, perche' sull'ultimo pezzo non esiste un pezzo successivo che
+    possa completarla;
+12. `utf8` prova lo stesso validatore su sequenze scelte (script CMake, senza
+    compilare): sequenze valide di 1-4 byte compresi i limiti, overlong,
+    surrogate, punte oltre U+10FFFF, lead proibiti, continuazioni orfane, lead
+    incompleti, residui negli ultimi 1-3 byte del file (anche su file piu'
+    lunghi di un pezzo) e sequenze a cavallo del confine fra i pezzi;
+13. `cleanup_guard` verifica la protezione della pulizia (script CMake, senza
+    compilare): i percorsi esterni alla build, quelli che la scavalcano con
+    `..`, quelli che attraversano una junction e la radice di un drive come
+    directory di build devono essere rifiutati, una junction interna alla build
+    invece accettata; inoltre i due script di generazione devono rifiutare un
+    `GG_*_REPO` esterno **prima** di cancellare o scrivere qualsiasi cosa. Le
+    directory "esterne" del test sono finte e stanno dentro la build: un
+    difetto del controllo non puo' cancellare dati veri.
 
 I repository di scala sono sintetici e deterministici: `tests/make_scale_repo.c`
 genera su stdout uno stream per `git fast-import` (commit su `main`, un
@@ -373,9 +404,19 @@ Lo script `make_test_repo.bat` crea il repository e **non cancella mai nulla**:
 se la directory di destinazione non esiste o e' vuota la usa, altrimenti esce
 con errore. La pulizia prima di ogni esecuzione la fa CMake
 (`tests/make_test_repo_fixture.cmake`), che rimuove con `file(REMOVE_RECURSE ...)`
-la sola cartella dei repository di test dentro la directory di build
-(`build/test_repos` per configurazione predefinita) e si rifiuta di procedere
-se `GG_TEST_REPO` fosse spostato fuori da quella cartella. Non servono piu'
+la sola cartella del repository di prova, dentro la cartella dei repository di
+test nella directory di build (`build/test_repos/gitgraph_test_repo` per
+configurazione predefinita). I percorsi di pulizia
+(`GG_TEST_REPO`, `GG_SCALE_REPO`) non sono variabili di cache - un `-D` non
+puo' spostarli - e prima di ogni cancellazione `tests/cleanup_guard.cmake`
+verifica che stiano **dentro la directory di build**, sia nel percorso scritto
+sia nel percorso reale: un componente che e' una junction (o un symlink) puo'
+portare fuori, e il confronto lessicale del prefisso non lo vede; il controllo
+risolve il piu' profondo antenato esistente, quindi vale anche quando la
+cartella da creare non esiste ancora. Se la verifica fallisce non viene
+cancellato ne' scritto nulla (la fixture verifica anche che il repository stia
+dentro la cartella dei test, con i percorsi reali). Il test `cleanup_guard`
+prova il controllo e questo rifiuto, senza toccare dati veri. Non servono piu'
 marcatori, controlli sui collegamenti ne' file sentinella: sono costi che
 diventano inutili quando a cancellare e' solo CMake, con un percorso noto.
 

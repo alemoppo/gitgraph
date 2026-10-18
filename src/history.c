@@ -1114,7 +1114,10 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
              *  2. se un candidato ha integrato b con un merge (la punta di b
              *     sta nella sua storia), e' il padre: lo dice la struttura;
              *     vale anche se nato dallo stesso punto, perche' il merge e'
-             *     un fatto;
+             *     un fatto. Solo se la prova identifica un unico candidato:
+             *     con piu' candidati che hanno integrato b la struttura non
+             *     distingue e la scelta non e' un fatto di Git (si prosegue
+             *     con le regole seguenti);
              *  3. fratelli nati dallo stesso punto: sempre ambigui, anche se
              *     il candidato e' uno solo (regola dei fratelli, dichiarata e
              *     testata sui casi mk3). Un tronco in coda ai candidati (l'antenato
@@ -1149,16 +1152,28 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
             }
             /* X che integra b con un merge (b sta nella storia di X): e' il
              * padre, lo dice la struttura. Vale anche quando nasce dallo
-             * stesso punto: il merge e' un fatto, i fratelli no. */
+             * stesso punto: il merge e' un fatto, i fratelli no.
+             *
+             * La prova pero' vale solo se identifica un unico candidato:
+             * piu' candidati possono aver integrato b, e in quel caso la
+             * struttura non dice quale dei due sia il padre. Non si sceglie
+             * il primo trovato (l'ordine dei candidati non e' un fatto di
+             * Git): il caso resta ambiguo, salvo che un'altra regola gia'
+             * definita (il tronco fra i candidati) lo risolva. */
+            size_t merge_count = 0;
+            size_t merge_cand = NO_POS;
             if (chosen == NO_POS) {
                 for (size_t k = 0; k < b->fork_cand; k++) {
                     const Family *cf = &ctx->families[b->cand[k]];
                     if (cf->tip_idx != NO_POS &&
                         bitset_test(cf->reach, b->tip_idx)) {
-                        chosen = b->cand[k];
-                        break;
+                        if (merge_count == 0)
+                            merge_cand = b->cand[k];
+                        merge_count++;
                     }
                 }
+                if (merge_count == 1)
+                    chosen = merge_cand;
             }
             if (chosen == NO_POS && !fratelli)
                 chosen = trunk_among(ctx, b);
@@ -1221,6 +1236,13 @@ static void deduce(Ctx *ctx, size_t fi, Deduction *d)
                 d->state = PARENT_AMBIGUOUS;
                 sb_appendf(&mot, "punto di diramazione %s: %s", sh, lhs);
                 free(lhs);
+                /* piu' candidati hanno integrato b con un merge: la struttura
+                 * non distingue quale sia il padre, e la motivazione lo dice
+                 * invece di far credere che la scelta sia un fatto */
+                if (merge_count > 1)
+                    append_note(&mot,
+                                "piu' candidati hanno integrato questo branch "
+                                "con un merge: la struttura non distingue");
                 /* Suggerimento fra i candidati: il piu' vecchio, perche' la
                  * struttura non distingue e di solito il padre e' quello su cui
                  * gli altri sono nati. Non e' un fatto dedotto: [parents]

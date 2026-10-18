@@ -288,6 +288,35 @@ static void free_perm(GitData *d)
     free(d->refs);
 }
 
+/* Copia con i riferimenti in un ordine diverso (stessi oggetti, stesse punte,
+ * stessi nomi): l'ordine dell'array dei riferimenti non deve entrare in nessuna
+ * regola, quindi il modello deve restare identico. */
+static void apply_reorder(const GitData *in, int kind, GitData *out)
+{
+    size_t n = in->ref_count;
+    *out = *in;
+    out->refs = (GitRef *)calloc(n ? n : 1, sizeof(GitRef));
+    for (size_t i = 0; i < n; i++) {
+        size_t src;
+        if (kind == 1)
+            src = n - 1 - i; /* ordine invertito */
+        else if (kind == 2)
+            src = (i + 1) % n; /* rotazione di uno */
+        else
+            src = i;
+        out->refs[i] = in->refs[src];
+    }
+    out->ref_count = n;
+}
+
+/* Libera solo l'array: le stringhe sono quelle della copia da cui deriva. */
+static void free_reorder(GitData *d)
+{
+    free(d->refs);
+    d->refs = NULL;
+    d->ref_count = 0;
+}
+
 /* Tutte le permutazioni di 0..n-1 (n <= 4: 24 al massimo). */
 /* Tutte le permutazioni di 0..n-1 (n <= 4, quindi al massimo 24). */
 static size_t permutations(size_t n, size_t perm[][4], size_t max)
@@ -430,6 +459,162 @@ static void check_group(const GitData *base, const char **names, size_t n,
         free(names);
         config_free(&cfg);
     }
+    free(riferimento);
+    free(rif_layout);
+}
+
+/* Costruisce il modello sulla copia data e ne restituisce le due descrizioni
+ * canoniche (genealogia e disposizione). Le proprieta' condivise sono
+ * controllate qui: nessun chiamante deve ricordarsele. */
+static bool describe_model(const GitData *d, const char *etichetta, char **out_gen,
+                           char **out_lay)
+{
+    char **names = (char **)calloc(d->ref_count + 1, sizeof(char *));
+    size_t nn = 0;
+    for (size_t i = 0; i < d->ref_count; i++)
+        if (d->refs[i].kind == REF_LOCAL_BRANCH)
+            names[nn++] = d->refs[i].name;
+    GraphConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    config_set_implicit_trunk(&cfg, names, nn);
+
+    History hist;
+    char err[512];
+    bool ok = history_build(&hist, d, &cfg, err, sizeof err);
+    if (!ok) {
+        CHECK(false, "%s: history_build fallita (%s)", etichetta, err);
+        free(names);
+        config_free(&cfg);
+        return false;
+    }
+    check_suggestions_acyclic(&hist, etichetta);
+    gg_check_trunk_ancestry(&hist, d, etichetta);
+    Layout lay;
+    layout_build(&lay, &hist);
+    gg_check_layout(&lay, &hist, etichetta);
+    *out_gen = describe(&hist, d);
+    *out_lay = describe_layout(&hist, d, &lay);
+    layout_free(&lay);
+    history_free(&hist);
+    free(names);
+    config_free(&cfg);
+    return true;
+}
+
+/* Verita' attesa del caso a due merge: il branch 'b' e' ambiguo, senza padre,
+ * con 'x' e 'y' fra i candidati, e la motivazione dichiara che la struttura non
+ * distingue (nessuna certezza che Git non da'). */
+static void check_b_ambiguous(const GitData *data, const char *b_name,
+                              const char *x_name, const char *y_name,
+                              const char *etichetta)
+{
+    char **names = (char **)calloc(data->ref_count + 1, sizeof(char *));
+    size_t nn = 0;
+    for (size_t i = 0; i < data->ref_count; i++)
+        if (data->refs[i].kind == REF_LOCAL_BRANCH)
+            names[nn++] = data->refs[i].name;
+    GraphConfig cfg;
+    memset(&cfg, 0, sizeof cfg);
+    config_set_implicit_trunk(&cfg, names, nn);
+
+    History hist;
+    char err[512];
+    if (!history_build(&hist, data, &cfg, err, sizeof err)) {
+        CHECK(false, "%s: history_build fallita (%s)", etichetta, err);
+        free(names);
+        config_free(&cfg);
+        return;
+    }
+    size_t bi = history_find_branch(&hist, b_name);
+    CHECK(bi != (size_t)-1, "%s: branch '%s' assente dal modello", etichetta,
+          b_name);
+    if (bi != (size_t)-1) {
+        const BranchNode *bn = &hist.branches[bi];
+        CHECK(bn->state == PARENT_AMBIGUOUS && bn->parent == NULL,
+              "%s: '%s' atteso ambiguo senza padre, trovato %s (stato %d)",
+              etichetta, b_name, bn->parent ? bn->parent : "-", (int)bn->state);
+        size_t tx = tip_of(&hist, data, x_name);
+        size_t ty = tip_of(&hist, data, y_name);
+        bool cx = false, cy = false;
+        for (size_t k = 0; k < bn->candidate_count && bn->candidates; k++) {
+            size_t ct = tip_of(&hist, data, bn->candidates[k]);
+            if (ct == tx)
+                cx = true;
+            if (ct == ty)
+                cy = true;
+        }
+        CHECK(cx && cy,
+              "%s: fra i candidati di '%s' mancano i due che hanno integrato "
+              "(candidati: %zu, x=%s y=%s)",
+              etichetta, b_name, bn->candidate_count, cx ? "si" : "no",
+              cy ? "si" : "no");
+        CHECK(bn->motivation &&
+                  strstr(bn->motivation, "integrato questo branch con un merge"),
+              "%s: la motivazione di '%s' non dichiara i due merge: %s",
+              etichetta, b_name, bn->motivation ? bn->motivation : "-");
+    }
+    history_free(&hist);
+    free(names);
+    config_free(&cfg);
+}
+
+/* Il modello non deve cambiare quando cambiano i nomi del gruppo (base, x, y,
+ * b) ne' l'ordine dei riferimenti nell'array. Il difetto coperto: il padre
+ * veniva dedotto dal primo candidato con la punta di b nella storia, quindi il
+ * primo nell'ordine dei riferimenti, che non e' un fatto di Git. */
+static void check_doppio_merge(const GitData *data, const char **names, size_t n,
+                               const char *b_name, const char *x_name,
+                               const char *y_name, const char *etichetta)
+{
+    check_b_ambiguous(data, b_name, x_name, y_name, etichetta);
+
+    size_t perm[24][4];
+    size_t count = permutations(n, perm, 24);
+    char *riferimento = NULL;
+    char *rif_layout = NULL;
+    size_t confronti = 0;
+
+    for (size_t k = 0; k < count; k++) {
+        GitData rinominato;
+        apply_perm(data, names, n, perm[k], &rinominato);
+        for (int ordine = 0; ordine < 3; ordine++) {
+            GitData ordinato;
+            apply_reorder(&rinominato, ordine, &ordinato);
+            char *desc = NULL, *dl = NULL;
+            if (describe_model(&ordinato, etichetta, &desc, &dl)) {
+                if (k == 0 && ordine == 0) {
+                    riferimento = desc;
+                    rif_layout = dl;
+                    printf("%s: %zu permutazioni x 3 ordini, modello di "
+                           "riferimento:\n%s",
+                           etichetta, count, riferimento);
+                } else if (riferimento && rif_layout) {
+                    CHECK(strcmp(desc, riferimento) == 0,
+                          "%s: nomi %zu / ordine %d cambiano il modello\n"
+                          "--- atteso ---\n%s--- trovato ---\n%s",
+                          etichetta, k, ordine, riferimento, desc);
+                    CHECK(strcmp(dl, rif_layout) == 0,
+                          "%s: nomi %zu / ordine %d cambiano la disposizione\n"
+                          "--- atteso ---\n%s--- trovato ---\n%s",
+                          etichetta, k, ordine, rif_layout, dl);
+                    free(desc);
+                    free(dl);
+                } else {
+                    /* il modello di riferimento non e' stato costruito (il
+                     * fallimento e' gia' stato registrato): niente da
+                     * confrontare */
+                    free(desc);
+                    free(dl);
+                }
+                confronti++;
+            }
+            free_reorder(&ordinato);
+        }
+        free_perm(&rinominato);
+    }
+    CHECK(confronti == count * 3,
+          "%s: modelli costruiti %zu, attesi %zu", etichetta, confronti,
+          count * 3);
     free(riferimento);
     free(rif_layout);
 }
@@ -711,6 +896,80 @@ static bool make_mk3(const char *path, const char *p_name, const char *c_name,
     return run_git_in(path, fine, err, err_size);
 }
 
+/* Un merge --no-ff con l'istante voluto (autore e committer). */
+static bool merge_at(const char *path, long long istante, const char *branch,
+                     char *err, size_t err_size)
+{
+    char date[40];
+    snprintf(date, sizeof date, "@%lld +0000", istante);
+    SetEnvironmentVariableA("GIT_AUTHOR_DATE", date);
+    SetEnvironmentVariableA("GIT_COMMITTER_DATE", date);
+    const char *mg[] = {"-c",   "user.name=T", "-c",      "user.email=t@t",
+                        "merge", "-q",         "--no-ff", "-m",
+                        "MERGE", branch,       NULL};
+    bool ok = run_git_in(path, mg, err, err_size);
+    SetEnvironmentVariableA("GIT_AUTHOR_DATE", NULL);
+    SetEnvironmentVariableA("GIT_COMMITTER_DATE", NULL);
+    return ok;
+}
+
+/* Repository con due candidati distinti che hanno integrato lo stesso branch
+ * con un merge: 'b' nasce da un punto interno di 'base' (P, che non e' la punta
+ * di nessuno e non sta sul tronco), 'x' e 'y' nascono da quel punto e poi
+ * uniscono 'b' con un merge --no-ff. La struttura Git non dice quale dei due
+ * sia il padre: il modello deve restare ambiguo, qualunque sia l'ordine dei
+ * riferimenti. */
+static bool make_doppio_merge(const char *path, const char *b_name,
+                              const char *x_name, const char *y_name, char *err,
+                              size_t err_size)
+{
+    back_to(g_work);
+    remove_tree(path);
+    CreateDirectoryA(path, NULL);
+    const char *init[] = {"init", "-b", "main", "-q", NULL};
+    if (!run_git_in(path, init, err, err_size))
+        return false;
+    long long t = 1780000000; /* base fissa: repository ripetibile */
+    if (!commit_at(path, t, "A", err, err_size) ||
+        !commit_at(path, t + 1, "B", err, err_size))
+        return false;
+    /* base nasce da main~1 (= A): P e Q */
+    const char *co_base[] = {"checkout", "-q", "-b", "base", "main~1", NULL};
+    if (!run_git_in(path, co_base, err, err_size))
+        return false;
+    if (!commit_at(path, t + 2, "P", err, err_size) ||
+        !commit_at(path, t + 3, "Q", err, err_size))
+        return false;
+    /* b nasce da base~1 (= P) */
+    const char *da = "base~1";
+    const char *co_b[] = {"checkout", "-q", "-b", b_name, da, NULL};
+    if (!run_git_in(path, co_b, err, err_size))
+        return false;
+    if (!commit_at(path, t + 4, "B1", err, err_size))
+        return false;
+    /* x e y nascono da P e ognuno integra b con un merge */
+    const char *nomi[2] = {x_name, y_name};
+    const char *msg[2] = {"X1", "Y1"};
+    for (int i = 0; i < 2; i++) {
+        const char *co[8];
+        size_t c = 0;
+        co[c++] = "checkout";
+        co[c++] = "-q";
+        co[c++] = "-b";
+        co[c++] = nomi[i];
+        co[c++] = da;
+        co[c] = NULL;
+        if (!run_git_in(path, co, err, err_size))
+            return false;
+        if (!commit_at(path, t + 5 + 2 * i, msg[i], err, err_size))
+            return false;
+        if (!merge_at(path, t + 6 + 2 * i, b_name, err, err_size))
+            return false;
+    }
+    const char *fine[] = {"checkout", "-q", "main", NULL};
+    return run_git_in(path, fine, err, err_size);
+}
+
 /* Verita' nota dei casi mk3 (regola dei fratelli): i due rami nascono dallo
  * stesso punto e nessuno contiene l'altro, quindi sono sempre ambigui
  * l'uno con l'altro, qualunque sia il nome. Il ramo piu' antico ha anche
@@ -936,6 +1195,23 @@ int main(int argc, char **argv)
         back_to(g_work);
         remove_tree(path_mk);
     }
+
+    /* il caso dei due candidati che hanno integrato lo stesso branch con un
+     * merge: la struttura non distingue e il modello non deve scegliere il
+     * primo candidato per ordine dei riferimenti */
+    char path_dm[MAX_PATH];
+    snprintf(path_dm, sizeof path_dm, "%s\\gg_invarianza_dm", root);
+    const char *b_nome = "b", *x_nome = "x", *y_nome = "y";
+    REQUIRE(make_doppio_merge(path_dm, b_nome, x_nome, y_nome, err, sizeof err),
+            "creazione del repository a due merge fallita: %s", err);
+    REQUIRE(gitdata_load(&base, path_dm, err, sizeof err),
+            "caricamento del repository a due merge fallito: %s", err);
+    const char *g_dm[] = {"base", x_nome, y_nome, b_nome};
+    check_doppio_merge(&base, g_dm, 4, b_nome, x_nome, y_nome,
+                       "riproduzione: due candidati integrano 'b' (merge)");
+    gitdata_free(&base);
+    back_to(g_work);
+    remove_tree(path_dm);
 
     printf("%d controlli superati, %d falliti (%d permutazioni confrontate)\n",
            g_pass, g_fail, permutazioni);

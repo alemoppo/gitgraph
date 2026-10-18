@@ -97,6 +97,24 @@ static char *wide_to_utf8(const wchar_t *w)
     return s;
 }
 
+bool git_path_to_utf8(const wchar_t *w, char *out, size_t out_size, size_t *need)
+{
+    if (need)
+        *need = 0;
+    if (!w || !out)
+        return false;
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    if (n <= 0)
+        return false;
+    if (need)
+        *need = (size_t)n;
+    if ((size_t)n > out_size)
+        return false; /* non entra: out non viene toccato, nemmeno in parte */
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, out, n, NULL, NULL) <= 0)
+        return false;
+    return true;
+}
+
 /* Thread di lettura: consuma una pipe fino alla chiusura. Con un thread per
  * pipe non esiste attesa reciproca: se una pipe si riempie mentre l'altra
  * viene letta, l'altra la drena subito, quindi il figlio non si blocca mai in
@@ -190,7 +208,7 @@ static void reap_child(PROCESS_INFORMATION *pi)
  * le virgolette e gli spazi ai bordi che alcuni installer scrivono non sono
  * parte del percorso) e per ognuna si costruisce il candidato con
  * git_path_candidate, prendendo il primo git.exe esistente. */
-static char g_git_path[MAX_PATH];
+static char g_git_path[GG_PATH_UTF8_MAX];
 static bool g_git_searched;
 
 /* estremi utili della voce: le virgolette (comode degli installer) e gli
@@ -254,15 +272,31 @@ bool git_path_candidate(const wchar_t *entry, size_t entry_len,
     return true;
 }
 
+/* Copia in out il percorso di git gia' risolto. Un percorso UTF-8 puo' essere
+ * piu' lungo (in byte) del limite MAX_PATH sui code unit UTF-16: se non entra
+ * si segnala un errore chiaro invece di consegnare un percorso troncato. */
+static bool copy_git_path(char *out, size_t out_size, char *err, size_t err_size)
+{
+    size_t need = strlen(g_git_path) + 1;
+    if (need > out_size) {
+        set_err(err, err_size,
+                "percorso di git non rappresentabile nel buffer: servono %zu "
+                "byte, disponibili %zu", need, out_size);
+        return false;
+    }
+    memcpy(out, g_git_path, need);
+    return true;
+}
+
 /* Risolve git.exe in un percorso assoluto. Ritorna false se non e' stato
- * trovato in nessuna voce assoluta del PATH. */
-static bool resolve_git_path(char *out, size_t out_size)
+ * trovato in nessuna voce assoluta del PATH, o se il percorso non entra nel
+ * buffer out: in entrambi i casi lascia in err un messaggio esplicito. */
+static bool resolve_git_path(char *out, size_t out_size, char *err, size_t err_size)
 {
     if (g_git_searched) {
         if (!g_git_path[0])
-            return false;
-        snprintf(out, out_size, "%s", g_git_path);
-        return true;
+            goto not_found;
+        return copy_git_path(out, out_size, err, err_size);
     }
     g_git_searched = true;
     g_git_path[0] = '\0';
@@ -270,7 +304,7 @@ static bool resolve_git_path(char *out, size_t out_size)
     wchar_t path[32768];
     DWORD n = GetEnvironmentVariableW(L"PATH", path, (DWORD)(sizeof path / sizeof path[0]));
     if (n == 0 || n >= sizeof path / sizeof path[0])
-        return false;
+        goto not_found;
 
     const wchar_t *p = path;
     while (*p) {
@@ -281,12 +315,17 @@ static bool resolve_git_path(char *out, size_t out_size)
             git_path_candidate(p, len, candidate, MAX_PATH)) {
             DWORD attr = GetFileAttributesW(candidate);
             if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                char *utf8 = wide_to_utf8(candidate);
-                if (utf8) {
-                    snprintf(g_git_path, sizeof g_git_path, "%s", utf8);
-                    free(utf8);
+                size_t need = 0;
+                if (git_path_to_utf8(candidate, g_git_path, sizeof g_git_path,
+                                     &need))
                     break;
-                }
+                /* con la dimensione giusta non accade (il candidato e' al piu'
+                 * MAX_PATH code unit UTF-16, quindi al piu' 780 byte UTF-8):
+                 * se accadesse, meglio un errore esplicito di un troncamento */
+                set_err(err, err_size,
+                        "percorso di git troppo lungo: servono %zu byte, il "
+                        "buffer ne ha %zu", need, sizeof g_git_path);
+                return false;
             }
         }
         if (!sep)
@@ -294,9 +333,13 @@ static bool resolve_git_path(char *out, size_t out_size)
         p = sep + 1;
     }
     if (!g_git_path[0])
-        return false;
-    snprintf(out, out_size, "%s", g_git_path);
-    return true;
+        goto not_found;
+    return copy_git_path(out, out_size, err, err_size);
+
+not_found:
+    set_err(err, err_size,
+            "git non trovato nel PATH (cercato solo in voci assolute)");
+    return false;
 }
 
 /* Esegue `argv` (argv[0] = programma, es. "git"; terminato da NULL).
@@ -319,18 +362,25 @@ bool gitdata_capture(const char *const *argv, StrBuf *out, StrBuf *errout,
     /* Programma da eseguire: se e' "git", viene risolto una volta sola in un
      * percorso assoluto (mai la directory corrente), passato come
      * lpApplicationName e citato, quotato, in testa alla riga di comando. */
-    char app[MAX_PATH];
+    char app[GG_PATH_UTF8_MAX];
     const char *app_arg = argv[0];
     bool is_git = argv[0] && _stricmp(argv[0], "git") == 0;
     if (is_git) {
-        if (!resolve_git_path(app, sizeof app)) {
-            set_err(err, err_size,
-                    "git non trovato nel PATH (cercato solo in voci assolute)");
+        if (!resolve_git_path(app, sizeof app, err, err_size))
             return false;
-        }
         app_arg = app;
     } else {
-        snprintf(app, sizeof app, "%s", argv[0] ? argv[0] : "");
+        /* un percorso UTF-8 puo' superare MAX_PATH byte: anche qui niente
+         * troncamenti silenziosi */
+        const char *prog = argv[0] ? argv[0] : "";
+        size_t plen = strlen(prog) + 1;
+        if (plen > sizeof app) {
+            set_err(err, err_size,
+                    "percorso del programma non rappresentabile nel buffer: "
+                    "servono %zu byte, disponibili %zu", plen, sizeof app);
+            return false;
+        }
+        memcpy(app, prog, plen);
         app_arg = app;
     }
 

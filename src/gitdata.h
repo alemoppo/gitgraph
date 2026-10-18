@@ -46,6 +46,22 @@ bool git_path_entry_is_usable(const wchar_t *entry, size_t entry_len);
 bool git_path_candidate(const wchar_t *entry, size_t entry_len,
                         wchar_t *out, size_t out_size);
 
+/* Dimensione, in byte NUL incluso, del buffer per un percorso UTF-8: un
+ * percorso UTF-16 di MAX_PATH (260) code unit spende al piu' 3 byte UTF-8 per
+ * code unit (i code point del piano base fino a 3 byte; una coppia surrogata
+ * ne spende 4 per 2 code unit), quindi 780 byte. Attenzione a non confondere
+ * il limite di MAX_PATH, che vale sui code unit UTF-16, con i byte UTF-8: usare
+ * MAX_PATH come dimensione del buffer UTF-8 tronca i percorsi non ASCII. */
+#define GG_PATH_UTF8_MAX (260 * 3 + 1)
+
+/* Converte in UTF-8 un percorso UTF-16 (tipicamente il candidato git.exe di
+ * una voce del PATH). Ritorna true e scrive in out il percorso tradotto (NUL
+ * incluso) solo se entra per intero in out_size byte; altrimenti ritorna false
+ * senza toccare out e, se need non e' NULL, vi mette la lunghezza necessaria in
+ * byte (NUL incluso). Esposta per i test: il caso limite sono i percorsi non
+ * ASCII, che in UTF-8 occupano piu' byte che code unit UTF-16. */
+bool git_path_to_utf8(const wchar_t *w, char *out, size_t out_size, size_t *need);
+
 typedef enum {
     REF_LOCAL_BRANCH,
     REF_REMOTE_BRANCH,

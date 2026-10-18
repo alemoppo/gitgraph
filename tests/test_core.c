@@ -1137,6 +1137,86 @@ static void test_path_candidate(void)
           "buffer piccolo: il candidato doveva essere rifiutato");
 }
 
+/* Il percorso UTF-8 di un programma puo' essere piu' lungo (in byte) del
+ * limite MAX_PATH, che vale sui code unit UTF-16: il buffer dei percorsi
+ * convertiti non deve troncare e la lunghezza necessaria va dichiarata. Un
+ * percorso non ASCII e' il caso limite (in UTF-8 spende fino a 3 byte per
+ * code unit, o 4 per 2 code unit se surrogata). */
+static void test_path_utf8(void)
+{
+    /* 200 "e con accento grave" (2 byte UTF-8 per code unit) + "\git.exe":
+     * 408 byte, ben oltre MAX_PATH (260) */
+    wchar_t win[MAX_PATH];
+    size_t i = 0;
+    for (; i < 200; i++)
+        win[i] = 0x00E8;
+    const wchar_t *suffisso = L"\\git.exe";
+    for (size_t k = 0; suffisso[k]; k++)
+        win[i++] = suffisso[k];
+    win[i] = L'\0';
+
+    char out[GG_PATH_UTF8_MAX];
+    size_t need = 0;
+    memset(out, 0, sizeof out);
+    CHECK(git_path_to_utf8(win, out, sizeof out, &need),
+          "percorso non ASCII lungo: doveva entrare in GG_PATH_UTF8_MAX");
+    CHECK(need == 200 * 2 + 8 + 1,
+          "lunghezza necessaria errata: attesa %zu, trovata %zu",
+          (size_t)(200 * 2 + 8 + 1), need);
+    CHECK(strlen(out) == need - 1, "lunghezza del percorso convertito");
+    CHECK((unsigned char)out[0] == 0xC3 && (unsigned char)out[1] == 0xA8,
+          "primi byte del percorso convertito: attesi C3 A8");
+    CHECK((unsigned char)out[399] == 0xA8, "byte finale della sequenza");
+    CHECK(strcmp(out + 400, "\\git.exe") == 0, "suffisso del percorso convertito");
+
+    /* il buffer da MAX_PATH (il limite sbagliato, sui code unit UTF-16) non
+     * basta: la conversione e' rifiutata e out non viene toccata */
+    char piccolo[MAX_PATH];
+    memset(piccolo, 'Z', sizeof piccolo);
+    size_t need2 = 0;
+    CHECK(!git_path_to_utf8(win, piccolo, sizeof piccolo, &need2),
+          "percorso oltre MAX_PATH byte: doveva essere rifiutato");
+    CHECK(need2 == need, "lunghezza necessaria con il buffer piccolo");
+    CHECK(piccolo[0] == 'Z', "out non deve essere toccato quando non entra");
+
+    /* esattamente il necessario entra, un byte in meno no */
+    CHECK(git_path_to_utf8(win, out, need, NULL),
+          "percorso con buffer esattamente sufficiente");
+    CHECK(!git_path_to_utf8(win, out, need - 1, NULL),
+          "percorso con un byte in meno: doveva essere rifiutato");
+
+    /* caso peggiore: 257 code unit da 3 byte UTF-8 piu' una coppia surrogata
+     * (4 byte per 2 code unit) = 259 code unit (MAX_PATH-1) */
+    wchar_t massimo[MAX_PATH];
+    size_t m = 0;
+    for (; m < 257; m++)
+        massimo[m] = 0x20AC; /* euro: 3 byte UTF-8 */
+    massimo[m++] = 0xD83D; /* U+1F600, in coppia surrogata nel piano 0 */
+    massimo[m++] = 0xDE00;
+    massimo[m] = L'\0';
+    size_t need3 = 0;
+    CHECK(git_path_to_utf8(massimo, out, sizeof out, &need3),
+          "caso peggiore non ASCII: doveva entrare in GG_PATH_UTF8_MAX");
+    CHECK(need3 == 257 * 3 + 4 + 1,
+          "lunghezza del caso peggiore: attesa %zu, trovata %zu",
+          (size_t)(257 * 3 + 4 + 1), need3);
+    CHECK(need3 <= GG_PATH_UTF8_MAX,
+          "GG_PATH_UTF8_MAX (%d) non copre il caso peggiore (%zu)", GG_PATH_UTF8_MAX,
+          need3);
+
+    /* percorso ASCII: nessuna sorpresa, lunghezza = byte */
+    CHECK(git_path_to_utf8(L"C:\\Git\\cmd\\git.exe", out, sizeof out, &need),
+          "percorso ASCII: doveva entrare");
+    CHECK(strcmp(out, "C:\\Git\\cmd\\git.exe") == 0,
+          "percorso ASCII convertito: '%s'", out);
+    CHECK(need == strlen("C:\\Git\\cmd\\git.exe") + 1,
+          "lunghezza del percorso ASCII");
+
+    /* argomenti non validi: rifiuto senza scrivere */
+    CHECK(!git_path_to_utf8(NULL, out, sizeof out, NULL), "w NULL");
+    CHECK(!git_path_to_utf8(win, NULL, sizeof out, NULL), "out NULL");
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -1179,6 +1259,7 @@ int main(int argc, char **argv)
     test_pipe_capture();
     test_path_entry_selection();
     test_path_candidate();
+    test_path_utf8();
     test_git_lookup_safety(fake_git, argv[1]);
     test_implicit_trunk_helper();
 
