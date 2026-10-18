@@ -261,7 +261,10 @@ Undici test, nessuno con finestra:
    override, long-lived, determinismo, quoting degli argomenti,
    scelta delle voci del PATH per `git.exe` (vuota, `.`, `..`, relativa, con
    virgolette, UNC, assoluta: provata sulla funzione, non sulla ricerca, che
-   una volta sola per processo),
+   vale una volta sola per processo; per ogni voce è verificata anche la
+   costruzione del candidato `...\git.exe`: virgolette e spazi ai bordi
+   tolti, barre finali in stile Unix riscritte come barra Windows, radice
+   del drive senza barra replicata, `.` e le voci relative senza candidato),
    cattura di stdout/stderr senza blocco (pipe riempite oltre la capacità,
    entrambe le pipe attive contemporaneamente, uscita non zero e fallimento
    della creazione dei thread di lettura) e sicurezza della ricerca di git:

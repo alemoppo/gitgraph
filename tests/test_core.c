@@ -1015,47 +1015,88 @@ static void test_git_lookup_safety(const char *fake_git_path, const char *repo_p
 
 /* Scelta delle voci del PATH per git.exe.
  *
- * La funzione e' provata qui direttamente: la ricerca vera e' memorizzata dopo
- * la prima chiamata (il processo non deve ripeterla), quindi un test che la
- * richiamasse non potrebbe provarle piu' di una volta. */
-static void check_entry(const wchar_t *entry, bool atteso, size_t attesa_len)
+ * Le funzioni sono provate qui direttamente: la ricerca vera e' memorizzata
+ * dopo la prima chiamata (il processo non deve ripeterla), quindi un test che
+ * la richiamasse non potrebbe provarle piu' di una volta. */
+static void check_entry(const wchar_t *entry, bool atteso)
 {
-    size_t len = 12345;
-    bool ok = git_path_entry_is_usable(entry, wcslen(entry), &len);
+    bool ok = git_path_entry_is_usable(entry, wcslen(entry));
     CHECK(ok == atteso, "voce '%ls': atteso %s, trovato %s", entry,
           atteso ? "utilizzabile" : "scartata", ok ? "utilizzabile" : "scartata");
-    if (ok == atteso && attesa_len != 12345)
-        CHECK(len == attesa_len, "voce '%ls': lunghezza utile attesa %zu, trovata %zu",
-              entry, attesa_len, len);
 }
 
 static void test_path_entry_selection(void)
 {
     /* scartate: vuota, punto, punto due, voce relativa */
-    check_entry(L"", false, 0);
-    check_entry(L".", false, 1);
-    check_entry(L"..", false, 2);
-    check_entry(L"rel\\dir", false, 7);
-    check_entry(L"bin", false, 3);
+    check_entry(L"", false);
+    check_entry(L".", false);
+    check_entry(L"..", false);
+    check_entry(L"rel\\dir", false);
+    check_entry(L"bin", false);
     /* non sono assolute: drive senza barra */
-    check_entry(L"C:", false, 2);
-    check_entry(L"C:rel\\dir", false, 9);
+    check_entry(L"C:", false);
+    check_entry(L"C:rel\\dir", false);
     /* assolute */
-    check_entry(L"C:\\", true, 3);
-    check_entry(L"C:\\Program Files\\Git\\cmd", true, 24);
-    check_entry(L"D:/tools/git", true, 12);
+    check_entry(L"C:\\", true);
+    check_entry(L"C:\\Program Files\\Git\\cmd", true);
+    check_entry(L"D:/tools/git", true);
     /* UNC: assoluta anche senza lettera di drive */
-    check_entry(L"\\\\server\\share", true, 14);
-    check_entry(L"\\\\server\\share\\", true, 15);
+    check_entry(L"\\\\server\\share", true);
+    check_entry(L"\\\\server\\share\\", true);
     /* virgolette ai bordi: alcuni installer le mettono, non sono parte del
-     * percorso e la voce resta utilizzabile, con la lunghezza utile */
-    check_entry(L"\"C:\\Program Files\\Git\\cmd\"", true, 24);
-    check_entry(L"\"\\\\server\\share\"", true, 14);
+     * percorso e la voce resta utilizzabile */
+    check_entry(L"\"C:\\Program Files\\Git\\cmd\"", true);
+    check_entry(L"\"\\\\server\\share\"", true);
     /* virgolette ma voce non assoluta: resta scartata */
-    check_entry(L"\".\"", false, 1);
-    check_entry(L"\"rel\\dir\"", false, 7);
+    check_entry(L"\".\"", false);
+    check_entry(L"\"rel\\dir\"", false);
     /* solo virgolette: voce vuota */
-    check_entry(L"\"\"", false, 0);
+    check_entry(L"\"\"", false);
+}
+
+/* Da voce del PATH a nome del file da cercare: la costruzione parte sempre
+ * dalla voce originale (con virgolette e spazi ai bordi, che non sono parte
+ * del percorso) e aggiunge "\\git.exe": se la voce termina con una barra
+ * quella non va replicata, se e' la radice del drive (C:\) la barra resta. */
+static void check_candidate(const wchar_t *entry, const wchar_t *atteso)
+{
+    wchar_t buf[MAX_PATH];
+    bool ok = git_path_candidate(entry, wcslen(entry), buf, MAX_PATH);
+    CHECK((ok && atteso != NULL) || (!ok && atteso == NULL),
+          "candidato della voce '%ls': atteso %s", entry,
+          atteso ? "un candidato" : "nessun candidato");
+    if (ok && atteso)
+        CHECK(wcscmp(buf, atteso) == 0,
+              "candidato della voce '%ls': atteso '%ls', trovato '%ls'", entry,
+              atteso, buf);
+}
+
+static void test_path_candidate(void)
+{
+    /* i due casi richiesti: virgolette ai bordi e barra finale */
+    check_candidate(L"\"C:\\Program Files\\Git\\cmd\"",
+                    L"C:\\Program Files\\Git\\cmd\\git.exe");
+    check_candidate(L"C:\\Git\\cmd\\", L"C:\\Git\\cmd\\git.exe");
+    /* le spaziature ai bordi non sono parte del percorso, quelle interne si' */
+    check_candidate(L" \"C:\\Program Files\\Git\\cmd\" ",
+                    L"C:\\Program Files\\Git\\cmd\\git.exe");
+    check_candidate(L"C:\\Program Files\\Git\\cmd/",
+                    L"C:\\Program Files\\Git\\cmd\\git.exe");
+    /* radice del drive: la barra finale resta */
+    check_candidate(L"C:\\", L"C:\\git.exe");
+    check_candidate(L"D:/", L"D:\\git.exe");
+    /* scartate: nessun candidato (e out non toccato) */
+    check_candidate(L".", NULL);
+    check_candidate(L"..", NULL);
+    check_candidate(L"\".\"", NULL);
+    check_candidate(L"rel\\dir", NULL);
+    check_candidate(L"\"C:rel\\dir\"", NULL);
+    check_candidate(L"C:", NULL);
+    /* buffer piccolo: il candidato non entra */
+    wchar_t piccolo[8];
+    CHECK(!git_path_candidate(L"C:\\Git\\cmd", 10, piccolo,
+                              sizeof piccolo / sizeof piccolo[0]),
+          "buffer piccolo: il candidato doveva essere rifiutato");
 }
 
 int main(int argc, char **argv)
@@ -1099,6 +1140,7 @@ int main(int argc, char **argv)
     test_cmdline_quoting();
     test_pipe_capture();
     test_path_entry_selection();
+    test_path_candidate();
     test_git_lookup_safety(fake_git, argv[1]);
     test_implicit_trunk_helper();
 

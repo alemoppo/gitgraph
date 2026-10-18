@@ -186,34 +186,72 @@ static void reap_child(PROCESS_INFORMATION *pi)
  * repository predefinito e' proprio la directory corrente, quindi un git.exe
  * piazzato nella radice del repository verrebbe eseguito al posto del vero.
  * Qui invece si percorrono le voci del PATH, se ne scelgono solo quelle
- * assolute (quindi mai ".", mai una voce relativa, mai la directory corrente)
- * e si prende il primo git.exe esistente. */
+ * assolute (quindi mai ".", mai una voce relativa, mai la directory corrente;
+ * le virgolette e gli spazi ai bordi che alcuni installer scrivono non sono
+ * parte del percorso) e per ognuna si costruisce il candidato con
+ * git_path_candidate, prendendo il primo git.exe esistente. */
 static char g_git_path[MAX_PATH];
 static bool g_git_searched;
 
-bool git_path_entry_is_usable(const wchar_t *entry, size_t entry_len,
-                               size_t *usable_len)
+/* estremi utili della voce: le virgolette (comode degli installer) e gli
+ * spazi estremi non sono parte del percorso e vanno tolti prima di giudicare
+ * la voce; le barre finali restano (la voce termina sempre su una
+ * directory): non vanno replicate quando si costruisce il nome del file */
+static void git_path_trimmed(const wchar_t *entry, size_t len, size_t *start,
+                             size_t *end)
 {
-    /* virgolette ai bordi: alcuni installer scrivono il proprio path come
-     * "C:\Program Files\Git\cmd". Non sono parte del percorso, sono solo
-     * comodo: vanno tolte prima di giudicare la voce e prima di costruire il
-     * nome del file da cercare. */
-    size_t len = entry_len;
-    if (len > 0 && entry[0] == L'"') {
-        entry++;
-        len--;
-    }
-    while (len > 0 && (entry[len - 1] == L'"' || entry[len - 1] == L' '))
-        len--;
-    if (usable_len)
-        *usable_len = len;
+    size_t s = 0, e = len;
+    while (s < e && (entry[s] == L'"' || entry[s] == L' '))
+        s++;
+    while (e > s && (entry[e - 1] == L'"' || entry[e - 1] == L' '))
+        e--;
+    *start = s;
+    *end = e;
+}
+
+bool git_path_entry_is_usable(const wchar_t *entry, size_t entry_len)
+{
+    size_t s, e;
+    git_path_trimmed(entry, entry_len, &s, &e);
+    entry += s;
+    size_t len = e - s;
     if (len == 0 || entry[0] == L'.')
-        return false; /* vuota, "." o ".." */
+        return false; /* vuota, ".", ".." o una relativa che inizia col punto */
     if (entry[0] == L'\\' && len > 1 && entry[1] == L'\\')
         return true; /* percorso UNC: assoluto */
     if (len < 3)
         return false;
     return (entry[1] == L':' && (entry[2] == L'\\' || entry[2] == L'/'));
+}
+
+bool git_path_candidate(const wchar_t *entry, size_t entry_len,
+                        wchar_t *out, size_t out_size)
+{
+    if (!out || out_size == 0)
+        return false;
+    size_t s, e;
+    git_path_trimmed(entry, entry_len, &s, &e);
+    entry += s;
+    size_t len = e - s;
+    if (!git_path_entry_is_usable(entry, len))
+        return false;
+    /* la voce (e' pur sempre una directory, magari con la barra finale:
+     * "C:\Git\cmd\" o addirittura la radice del drive "C:\") piu' "git.exe",
+     * aggiungendo la barra di separazione solo se manca */
+    bool con_barra = len > 0 && (entry[len - 1] == L'\\' || entry[len - 1] == L'/');
+    size_t sep_len = con_barra ? 0 : 1;
+    /* la voce + la barra + "git.exe" (7 + NUL) devono entrare per intero */
+    if (len + sep_len + 9 > out_size)
+        return false;
+    memcpy(out, entry, len * sizeof(wchar_t));
+    if (con_barra) {
+        if (out[len - 1] == L'/')
+            out[len - 1] = L'\\'; /* separatore in stile Unix: barra Windows */
+    } else {
+        out[len++] = L'\\';
+    }
+    memcpy(out + len, L"git.exe", 8 * sizeof(wchar_t)); /* 7 caratteri + NUL */
+    return true;
 }
 
 /* Risolve git.exe in un percorso assoluto. Ritorna false se non e' stato
@@ -238,22 +276,16 @@ static bool resolve_git_path(char *out, size_t out_size)
     while (*p) {
         const wchar_t *sep = wcschr(p, L';');
         size_t len = sep ? (size_t)(sep - p) : wcslen(p);
-        size_t usable = 0;
+        wchar_t candidate[MAX_PATH];
         if (len > 0 && len < MAX_PATH &&
-            git_path_entry_is_usable(p, len, &usable)) {
-            wchar_t candidate[MAX_PATH];
-            /* usable + "\git.exe" + NUL */
-            if (usable + 9 < MAX_PATH) {
-                memcpy(candidate, p, usable * sizeof(wchar_t));
-                memcpy(candidate + usable, L"\\git.exe", 9 * sizeof(wchar_t));
-                DWORD attr = GetFileAttributesW(candidate);
-                if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                    char *utf8 = wide_to_utf8(candidate);
-                    if (utf8) {
-                        snprintf(g_git_path, sizeof g_git_path, "%s", utf8);
-                        free(utf8);
-                        break;
-                    }
+            git_path_candidate(p, len, candidate, MAX_PATH)) {
+            DWORD attr = GetFileAttributesW(candidate);
+            if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                char *utf8 = wide_to_utf8(candidate);
+                if (utf8) {
+                    snprintf(g_git_path, sizeof g_git_path, "%s", utf8);
+                    free(utf8);
+                    break;
                 }
             }
         }

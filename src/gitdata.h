@@ -25,13 +25,26 @@ typedef struct {
     char *message;   /* messaggio completo, multi-riga, UTF-8 */
 } GitCommit;
 
-/* Voce di PATH da considerare alla ricerca di git.exe: deve essere assoluta
- * (mai vuota, mai ".", mai relativa, mai la directory corrente) e senza
- * virgolette ai bordi. Esposta perche' i test la provano direttamente, senza
- * dipendere dalla cache della ricerca (che vale una volta sola per processo).
- * Se usable_len non e' NULL riceve la lunghezza della parte utile. */
-bool git_path_entry_is_usable(const wchar_t *entry, size_t entry_len,
-                               size_t *usable_len);
+/* Voce di PATH da considerare alla ricerca di git.exe: tolte virgolette e
+ * spazi ai bordi (alcuni installer scrivono la voce quotata; le virgolette e
+ * gli spazi estremi non sono parte del percorso), deve restare un percorso
+ * assoluto: mai vuota, mai "." o "..", mai relativa, mai la directory
+ * corrente. La funzione non costruisce nomi e non sposta puntatori (il
+ * giudizio usa solo la copia locale dei bordi). Esposta perche' i test la
+ * provano direttamente, senza dipendere dalla cache della ricerca (che vale
+ * una sola volta per processo). */
+bool git_path_entry_is_usable(const wchar_t *entry, size_t entry_len);
+
+/* Da una voce del PATH (grezza: con virgolette e spazi ai bordi come la
+ * scrive il PATH, con o senza barra finale) al nome del file da cercare
+ * in quella directory. Ritorna true e scrive in out la voce ripulita piu'
+ * "\\git.exe" (per "C:\Program Files\Git\cmd" esce
+ * "C:\Program Files\Git\cmd\git.exe", per C:\Git\cmd\ esce
+ * C:\Git\cmd\git.exe, senza doppie barre) solo se la voce e' utilizzabile e
+ * il risultato entra per intero in out; false altrimenti, senza scrivere in
+ * out se non entra. Esposta per i test. */
+bool git_path_candidate(const wchar_t *entry, size_t entry_len,
+                        wchar_t *out, size_t out_size);
 
 typedef enum {
     REF_LOCAL_BRANCH,
