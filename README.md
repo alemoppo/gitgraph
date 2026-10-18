@@ -16,7 +16,11 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
 - **Fase 4 (completata)**: layout dei commit (riga, corsia, proprietario,
   archi tra commit), etichette dei riferimenti remoti sulla corsia del locale,
   catene anonime con corsie riusabili; `gitgraph_dump --layout`.
-- Fasi successive: disegno con SDL3/SDL3_ttf, interazione.
+- **Fase 5 (completata)**: disegno con SDL3/SDL3_ttf (`gitgraph`): geometria
+  della scena senza SDL (`src/render.c`), finestra con corsie colorate, archi,
+  etichette dei riferimenti, marcatura di HEAD, archi suggeriti tratteggiati,
+  scorrimento e zoom; disegno verificabile senza finestra (driver `dummy`).
+- Fasi successive: interazione avanzata (dettaglio del commit, ricerca).
 
 ## Struttura
 
@@ -25,11 +29,13 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
     src/config.h/.c    configurazione: parser di graph.cfg (wildcard, validazione)
     src/history.h/.c   modello dei branch dedotto dalla storia
     src/layout.h/.c    disposizione del grafo (corsie, righe, archi; commit)
+    src/render.h/.c    geometria della scena da disegnare (senza SDL)
     src/dump_main.c    strumento di ispezione testuale (gitgraph_dump)
+    src/gui_main.c     finestra SDL3/SDL3_ttf (gitgraph)
     tests/             generatori del repo di prova e test automatici
     CMakeLists.txt     build con CMake
 
-`util`, `config`, `gitdata`, `history`, `layout` non dipendono da SDL.
+`util`, `config`, `gitdata`, `history`, `layout`, `render` non dipendono da SDL.
 
 ## Requisiti
 
@@ -40,13 +46,16 @@ fermato subito da CMake con un messaggio esplicito.
 
 - Windows con Git nel PATH.
 - Un compilatore C11 e CMake >= 3.20.
-- Per la GUI (dalle fasi successive): SDL3 e SDL3_ttf.
+- Per la GUI (facoltativa): SDL3 e SDL3_ttf. Senza di esse si compila il solo
+  core (e i test headless).
 
 ### MSYS2 UCRT64 (configurazione verificata)
 
     pacman -S mingw-w64-ucrt-x86_64-gcc \
               mingw-w64-ucrt-x86_64-cmake \
-              mingw-w64-ucrt-x86_64-ninja
+              mingw-w64-ucrt-x86_64-ninja \
+              mingw-w64-ucrt-x86_64-sdl3 \
+              mingw-w64-ucrt-x86_64-sdl3-ttf
 
 ### MSVC (alternativa documentata)
 
@@ -63,8 +72,13 @@ Da MSYS2 UCRT64 (o da un prompt con gcc/cmake/ninja nel PATH):
     cmake -S . -B build -G Ninja
     cmake --build build
 
-Eseguibili prodotti: `build/gitgraph_dump` (fase 1) e, nelle fasi
-successive, la GUI.
+Eseguibili prodotti: `build/gitgraph_dump` (ispezione testuale) e
+`build/gitgraph` (la GUI SDL3/SDL3_ttf). La GUI e' facoltativa: se SDL3 e
+SDL3_ttf non si trovano, `gitgraph` non viene creato e i test restano quelli
+headless. Si puo' disattivare con `-DGG_BUILD_GUI=OFF`. Dopo la build le DLL
+importate (SDL3, SDL3_ttf e le loro dipendenze) vengono copiate accanto
+all'eseguibile, cosi' funziona anche senza la directory dei binari di SDL nel
+PATH.
 
 ## Configurazione: graph.cfg
 
@@ -139,6 +153,9 @@ Stampa commit (ordine topologico), riferimenti, modello dei branch con
 padre, stato e motivazione, e la disposizione del grafo (corsie, righe e
 archi). `--full` mostra i messaggi di commit completi. `--layout` stampa solo
 la tabella dei commit (riga, corsia, proprietario) e gli archi tra commit.
+
+La GUI si avvia con `build/gitgraph.exe [percorso-repo]` (opzioni e comandi
+nella sezione "Rendering").
 
 ## Modello dei branch (sintesi)
 
@@ -328,14 +345,61 @@ e gli archi tra commit.
 - **Nessun nome nelle scelte**: corsie, righe e proprietari non cambiano se si
   rinominano i riferimenti. Il test `invariance` confronta la disposizione
   (branch e commit) in ogni permutazione, insieme al resto del modello.
-- **Solo numeri, nessuna finestra**: la fase 3 calcola le posizioni; il disegno
-  con SDL3/SDL3_ttf resta alla fase successiva.
+- **Solo numeri, nessuna finestra**: la fase 3 calcola le posizioni. La
+  geometria del disegno (fase 5) e' in `src/render.c`, sempre senza SDL; il
+  disegno vero e proprio e' in `src/gui_main.c`.
+
+## Rendering (fase 5)
+
+`gitgraph` disegna la scena in una finestra SDL3/SDL3_ttf. La geometria e' il
+modulo `render` (senza SDL): dai numeri del layout produce, in **unita' di
+scena** (x = corsia, y = riga, 0 = commit piu' recente in alto), i punti dei
+commit, le polilinee degli archi e le ancore delle etichette. Il disegnatore
+sceglie passo di corsia e di riga, margini, zoom e scorrimento, e traduce in
+pixel.
+
+Cosa si vede:
+
+- **Punti dei commit**: uno per commit, alla sua corsia, colorato per corsia
+  (palette ciclica di 16 colori, deterministica). Il commit di HEAD ha un
+  anello bianco; i commit anonimi (senza proprietario) hanno un colore
+  attenuato.
+- **Archi**: il primo genitore e' un segmento verticale; diramazione e
+  genitore di merge sono spezzate a gomito (figlio, mezzeria, corsia del
+  genitore, genitore), per non passare sopra i nodi.
+- **Archi suggeriti**: le diramazioni ambigue (padre suggerito, vedi il
+  modello) sono **tratteggiate**, distinte dagli archi certi. Gli archi di
+  paternita' a livello di branch non si duplicano: coincidono con la catena dei
+  commit.
+- **Etichette dei riferimenti**: una per branch, alla riga e corsia del suo
+  nodo; il branch corrente (HEAD) e' evidenziato. I riferimenti remoti
+  etichetta di un locale (`origin/main`) stanno sulla corsia del locale.
+- **Tag**: non hanno un nodo-branch nel modello (il layout segue i branch),
+  quindi non producono un'etichetta in questa fase.
+
+Comandi: frecce per scorrere, PagSu/PagGiu di una schermata, Home/Fine,
+`+`/`-` per lo zoom, `0` per tornare all'inizio, ESC per uscire; rotella del
+mouse per scorrere, Ctrl+rotella per lo zoom, trascinamento col tasto sinistro
+per spostare la vista. Il disegno e' cullato sulle righe visibili, cosi' un
+repository grande resta scorrevole.
+
+La finestra e' facoltativa per la verifica: con `--headless` (o con
+`--screenshot`) il programma usa il driver video `dummy` e il renderer
+software, cosi' disegna senza aprire nulla:
+
+    build/gitgraph [--font PERCORSO] [--width N] [--height N] \
+                   [--headless] [--screenshot FILE.bmp] [--frames N] [percorso-repo]
+
+`--screenshot` disegna un fotogramma, salva un BMP ed esce; `--frames N`
+disegna N fotogrammi ed esce. Il font predefinito e' un font di sistema
+(`--font` per sceglierne un altro); senza font le etichette non vengono
+disegnate ma il grafo si'.
 
 ## Test
 
     ctest --test-dir build --output-on-failure
 
-Quattordici test, nessuno con finestra:
+Sedici test, nessuno con finestra:
 
 1. `make_test_repo` genera il repository di prova (la fixture rimuove prima,
    dopo il controllo di `tests/cleanup_guard.cmake`, il solo percorso atteso
@@ -399,8 +463,17 @@ Quattordici test, nessuno con finestra:
    stesse regole (compresa la proprieta' che nessun arco passi sopra il nodo di
    un'altra catena nella stessa corsia) sono ripetute su ogni modello dalla
    proprieta' condivisa `gg_check_layout`;
-5. `dump_smoke` esegue lo strumento di dump;
-6. `invariance` verifica che la genealogia non dipenda dall'ordine alfabetico:
+5. `render` verifica la geometria della scena (fase 5): un punto per commit
+   alla sua corsia e riga (con indice del commit, HEAD marcato, anonimi
+   marcati), un arco per ogni arco tra commit con gli estremi sulle celle, il
+   primo genitore verticale di 2 punti, diramazione e merge a gomito di 4 punti
+   con la mezzeria esatta (verificati anche su un layout costruito a mano, con
+   coordinate attese), le diramazioni suggerite tratteggiate (comprese le punte
+   fuori dal log, che non producono arco), un'ancora per branch, il colore di
+   corsia deterministico (palette ciclica di 16), il determinismo (due
+   costruzioni identiche) e un layout vuoto che produce una scena vuota;
+6. `dump_smoke` esegue lo strumento di dump;
+7. `invariance` verifica che la genealogia non dipenda dall'ordine alfabetico:
    per ogni gruppo di branch con nidificazione o fratelli (nel repository di
    prova `branch1`/`branch2`, `branch1`/`sp`, `oA`/`oB`/`oC`,
    `amb1`/`amb2`/`ambbase`, `feature-x`/`rb`/`rm`) costruisce tutte le
@@ -422,18 +495,18 @@ Quattordici test, nessuno con finestra:
    punto, modalita' A e B con i nomi in entrambi gli ordini): tutti devono
    risultare `ambigui` con l'altro come unico candidato e un solo padre
    suggerito per data;
-7. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
+8. `make_scale_small` + `scale_small`: ~363 riferimenti / 10.000 commit entro
    3 s; il test stampa il numero di corsie rispetto ai rami (senza remoti nel
    generatore sono uguali) e verifica che non ci sia una corsia anonima;
-8. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
+9. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
    30 s (determinismo verificato anche sul repository grande);
-9. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
+10. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
    15 s, con ogni branch nato dal precedente (catena profonda): verifica il
    controllo delle relazioni circolari e l'ordinamento dei padri;
-10. `encoding` verifica che i file in `src/` e `tests/` siano **ASCII**: fallisce
+11. `encoding` verifica che i file in `src/` e `tests/` siano **ASCII**: fallisce
     se un file contiene un byte oltre `0x7F` (quindi anche i byte `C3 82` /
     `C3 83` del mojibake). Script CMake puro, senza compilare;
-11. `cleanup_guard` prova la protezione della pulizia
+12. `cleanup_guard` prova la protezione della pulizia
     (`tests/cleanup_guard.cmake`): percorsi esterni alla build, percorsi che la
     scavalcano con `..`, percorsi diversi da quello atteso, prefisso simile ma
     non antenato, radice di un drive, percorsi relativi o vuoti, e percorsi che
@@ -444,6 +517,11 @@ Quattordici test, nessuno con finestra:
     esterno senza cancellare ne' scrivere niente (lo stream `.stream` non
     compare) e che una sentinella fuori dalla build resti intatta: le directory
     esterne del test sono finte e stanno dentro la build.
+13. `gui_headless` (solo se la GUI e' compilata) disegna due fotogrammi in
+    modalita' headless (driver video `dummy`, renderer software), salva un BMP
+    (`<build>/gui_headless.bmp`) ed esce: verifica che la scena si costruisca e
+    si disegni senza finestra (la riga `render: ...` stampata dall'eseguibile
+    e' il criterio di passaggio).
 
 I repository di scala sono sintetici e deterministici: `tests/make_scale_repo.c`
 genera su stdout uno stream per `git fast-import` (commit su `main`, un

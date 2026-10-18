@@ -1,8 +1,9 @@
 # CMakeLists.txt - build di gitgraph.
 #
-# Fase 1: libreria "core" (util, config, gitdata, history) senza dipendenze
-# esterne, strumento di dump testuale e test automatici (ctest).
-# La GUI SDL3/SDL3_ttf verra' aggiunta in una fase successiva.
+# Libreria "core" (util, config, gitdata, history, layout, render) senza
+# dipendenze esterne, strumento di dump testuale, test automatici (ctest) e GUI
+# SDL3/SDL3_ttf facoltativa (gitgraph). La geometria della scena (render) resta
+# senza SDL: il solo disegno e' in src/gui_main.c.
 #
 # PIATTAFORMA: solo Windows. src/gitdata.c usa le API Win32 (CreateProcessW,
 # pipe, thread) e i test chiamano cmd.exe per generare il repository di prova:
@@ -37,6 +38,7 @@ add_library(gg_core STATIC
     src/gitdata.c
     src/history.c
     src/layout.c
+    src/render.c
 )
 target_include_directories(gg_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
@@ -67,6 +69,11 @@ target_link_libraries(test_config PRIVATE gg_core)
 # punta, corsie per famiglia, archi padre/suggerito. Headless, senza SDL.
 add_executable(test_layout tests/test_layout.c)
 target_link_libraries(test_layout PRIVATE gg_core)
+
+# Geometria della scena (fase 5): punti dei commit, archi, ancore delle
+# etichette. Headless, senza SDL: verifica coordinate e determinismo.
+add_executable(test_render tests/test_render.c)
+target_link_libraries(test_render PRIVATE gg_core)
 
 # Generatore di repository sintetici: scrive su stdout uno stream per
 # "git fast-import" (nessuna dipendenza dal core, serve solo la libc).
@@ -110,6 +117,11 @@ set_tests_properties(config PROPERTIES FIXTURES_REQUIRED testrepo)
 # Disposizione del grafo dei branch (fase 3).
 add_test(NAME layout COMMAND test_layout "${GG_TEST_REPO}")
 set_tests_properties(layout PROPERTIES FIXTURES_REQUIRED testrepo)
+
+# Geometria della scena (fase 5): coordinate dei punti, degli archi e delle
+# ancore, e determinismo. Headless, senza SDL.
+add_test(NAME render COMMAND test_render "${GG_TEST_REPO}")
+set_tests_properties(render PROPERTIES FIXTURES_REQUIRED testrepo)
 
 # Invarianza per rinomina: la genealogia non deve dipendere dall'ordine
 # alfabetico dei nomi. Il test rinomina i riferimenti in memoria (stessi commit,
@@ -205,3 +217,58 @@ endfunction()
 gg_add_scale_test(scale_small "${GG_SCALE_SMALL}" 10000 30 5 3 300 4)
 gg_add_scale_test(scale_large "${GG_SCALE_LARGE}" 50000 50 5 30 600 4)
 gg_add_scale_deep_test(scale_deep "${GG_SCALE_DEEP_REPO}" 20000 20 15 300)
+
+# --- GUI SDL3/SDL3_ttf (fase 5) ----------------------------------------------
+# La GUI e' facoltativa: il core e i test restano senza dipendenze esterne. Se
+# SDL3 e SDL3_ttf non si trovano, o se GG_BUILD_GUI=OFF, il target non viene
+# creato e i test restano quelli headless.
+option(GG_BUILD_GUI "Compila la GUI SDL3 (gitgraph)" ON)
+
+set(GG_GUI_OK OFF)
+if(GG_BUILD_GUI)
+    find_package(SDL3 CONFIG QUIET)
+    find_package(SDL3_ttf CONFIG QUIET)
+    if(SDL3_FOUND AND SDL3_ttf_FOUND)
+        set(GG_GUI_OK ON)
+    endif()
+endif()
+
+if(GG_GUI_OK)
+    add_executable(gitgraph src/gui_main.c)
+    target_link_libraries(gitgraph PRIVATE gg_core SDL3::SDL3 SDL3_ttf::SDL3_ttf)
+    if(MSVC)
+        target_compile_options(gitgraph PRIVATE /W4 /utf-8)
+    else()
+        target_compile_options(gitgraph PRIVATE -Wall -Wextra -Wpedantic)
+        # sqrtf: su MinGW-w64 basta la CRT, ma -lm e' innocuo e rende esplicita
+        # la dipendenza altrove.
+        target_link_libraries(gitgraph PRIVATE m)
+    endif()
+
+    # Copia le DLL importate (SDL3, SDL3_ttf e le loro dipendenze) accanto
+    # all'eseguibile, cosi' il programma e i test funzionano anche se la
+    # directory dei binari di SDL non e' nel PATH. $<TARGET_RUNTIME_DLLS>
+    # richiede CMake 3.21.
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
+        add_custom_command(TARGET gitgraph POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:gitgraph>
+                    "$<TARGET_FILE_DIR:gitgraph>"
+            COMMAND_EXPAND_LISTS)
+    endif()
+
+    # Disegno senza finestra (driver video "dummy"): disegna due fotogrammi,
+    # salva un BMP e verifica che la scena sia stata costruita (riga "render:").
+    add_test(NAME gui_headless
+             COMMAND gitgraph --headless --frames 2
+                     --screenshot "${CMAKE_CURRENT_BINARY_DIR}/gui_headless.bmp"
+                     "${GG_TEST_REPO}")
+    set_tests_properties(gui_headless PROPERTIES
+                         FIXTURES_REQUIRED testrepo
+                         PASS_REGULAR_EXPRESSION "render:"
+                         TIMEOUT 120)
+
+    message(STATUS "GUI SDL3 abilitata: target gitgraph (eseguibile in build/gitgraph.exe)")
+else()
+    message(STATUS "GUI SDL3 non compilata (SDL3/SDL3_ttf assenti o GG_BUILD_GUI=OFF)")
+endif()
