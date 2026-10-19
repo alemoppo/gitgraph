@@ -1,4 +1,4 @@
-/* test_render.c - test automatici della geometria della scena (fase 5).
+/* test_render.c - test automatici della geometria della scena (fasi 5 e 6).
  *
  * Uso: test_render <percorso-repo-di-test>
  *
@@ -15,21 +15,18 @@
  * 30 rami mergiati e cancellati in sequenza e su un repository pseudo-casuale
  * (seme fisso) con rami che si sovrappongono.
  *
- * Verifica inoltre:
- *  - un punto per ogni commit, alla corsia e riga del layout, con l'indice del
- *    commit; il commit di HEAD e' marcato; i commit anonimi sono marcati;
- *  - un arco per ogni arco tra commit, con gli estremi sulle celle dei commit;
- *    il primo genitore e' un segmento verticale di 2 punti; diramazione e
- *    merge sono spezzate di 3 punti con il gomito sulla riga giusta; la
- *    diramazione di un ramo con padre ambiguo e' tratteggiata, le altre no
- *    (nessun arco a livello di branch: la paternita' e' la catena dei commit);
- *  - un'ancora per branch, alla posizione del suo nodo;
- *  - colore di corsia deterministico (palette ciclica di 16);
- *  - due costruzioni successive identiche (memcmp);
- *  - un layout vuoto produce una scena vuota e render_free la rilascia.
- *
- * Esce con 0 se tutti i test passano, 1 se qualcuno fallisce, 2 su errore di
- * preparazione.
+ * Verifica inoltre: un punto per ogni commit, alla corsia e riga del layout,
+ * con l'indice del commit (HEAD e anonimi marcati); un arco per ogni arco tra
+ * commit, col gomito sulla riga giusta (primo genitore verticale, diramazione
+ * e merge a 3 punti, diramazione ambigua tratteggiata, destinazione del merge
+ * marcata); un'ancora per branch col branch rappresentante del gruppo; colori
+ * di corsia deterministici; due costruzioni identiche; ricerca sotto il
+ * puntatore di punti ed etichette; testo del pannello (hash completo, autore,
+ * data, messaggio a capo max 12 righe, genitori con "(merge)", riferimenti,
+ * ramo, stato, motivo, padre suggerito); filtri (maschera, compattazione senza
+ * buchi, archi ed etichette nascosti, caso R, invarianza di Layout e History);
+ * un layout vuoto produce una scena vuota. Esce con 0 se tutti i test
+ * passano, 1 se qualcuno fallisce, 2 su errore di preparazione.
  */
 #include "config.h"
 #include "gitdata.h"
@@ -96,8 +93,8 @@ static void check_paths(const Render *sc, const Layout *lay, const char *tag)
 {
     for (size_t i = 0; i < sc->line_count; i++) {
         const RenderLine *ln = &sc->lines[i];
-        size_t from = (size_t)ln->pts[0].y;
-        size_t to = (size_t)ln->pts[ln->n - 1].y;
+        size_t from = ln->from;
+        size_t to = ln->to;
         size_t owner_from = commit_owner(lay, from);
         size_t owner_to = commit_owner(lay, to);
         for (size_t s = 0; s + 1 < ln->n; s++) {
@@ -179,7 +176,7 @@ static void test_hand_built(void)
     lay.rows = 3;
 
     Render sc;
-    render_build(&sc, NULL, NULL, &lay);
+    render_build(&sc, NULL, NULL, &lay, NULL);
 
     CHECK(sc.dot_count == 3, "punti: attesi 3, ottenuti %zu", sc.dot_count);
     CHECK(sc.line_count == 3, "archi: attesi 3, ottenuti %zu", sc.line_count);
@@ -291,7 +288,7 @@ static void test_merge_continuation(void)
     lay.rows = 7;
 
     Render sc;
-    render_build(&sc, NULL, NULL, &lay);
+    render_build(&sc, NULL, NULL, &lay, NULL);
     CHECK(sc.dot_count == 7 && sc.line_count == 7,
           "merge che prosegue: %zu punti, %zu archi (attesi 7, 7)", sc.dot_count,
           sc.line_count);
@@ -316,7 +313,7 @@ static void test_empty(void)
     Layout lay;
     memset(&lay, 0, sizeof lay);
     Render sc;
-    render_build(&sc, NULL, NULL, &lay);
+    render_build(&sc, NULL, NULL, &lay, NULL);
     CHECK(sc.dot_count == 0 && sc.line_count == 0 && sc.anchor_count == 0,
           "scena vuota");
     CHECK(sc.lane_count == 0 && sc.rows == 0, "corsie e righe a zero");
@@ -324,7 +321,7 @@ static void test_empty(void)
 
     /* render_build con lay NULL non deve toccare nulla di pericoloso */
     Render sc2;
-    render_build(&sc2, NULL, NULL, NULL);
+    render_build(&sc2, NULL, NULL, NULL, NULL);
     CHECK(sc2.dot_count == 0 && sc2.line_count == 0, "lay NULL: scena vuota");
     render_free(&sc2);
 }
@@ -518,12 +515,12 @@ static void check_line_shape(const Render *sc, const Layout *lay,
         }
         if (ln->dashed &&
             (ln->kind != RENDER_LINE_BRANCH ||
-             !owner_ambiguous(lay, hist, (size_t)ln->pts[0].y))) {
+             !owner_ambiguous(lay, hist, ln->from))) {
             CHECK(false, "%s: arco %zu tratteggiato senza padre ambiguo", tag, i);
             return;
         }
         if (!ln->dashed && ln->kind == RENDER_LINE_BRANCH &&
-            owner_ambiguous(lay, hist, (size_t)ln->pts[0].y)) {
+            owner_ambiguous(lay, hist, ln->from)) {
             CHECK(false, "%s: diramazione %zu ambigua ma non tratteggiata", tag,
                   i);
             return;
@@ -535,7 +532,7 @@ static void check_line_shape(const Render *sc, const Layout *lay,
             CHECK(false, "%s: arco %zu con estremi non interi", tag, i);
             return;
         }
-        if (ln->lane != lay->commits[(size_t)ln->pts[0].y].lane) {
+        if (ln->lane != lay->commits[ln->from].lane) {
             CHECK(false, "%s: arco %zu con corsia diversa dal figlio", tag, i);
             return;
         }
@@ -573,7 +570,7 @@ static void check_scene(const char *repo, const char *tag)
         return;
     }
     Render sc;
-    render_build(&sc, &data, &hist, &lay);
+    render_build(&sc, &data, &hist, &lay, NULL);
 
     /* punti: uno per commit, alla sua cella */
     CHECK(sc.dot_count == lay.commit_count, "%s: punti == commit (%zu vs %zu)",
@@ -662,7 +659,7 @@ static void check_scene(const char *repo, const char *tag)
 
     /* determinismo: seconda costruzione identica */
     Render sc2;
-    render_build(&sc2, &data, &hist, &lay);
+    render_build(&sc2, &data, &hist, &lay, NULL);
     CHECK(sc2.dot_count == sc.dot_count && sc2.line_count == sc.line_count &&
               sc2.anchor_count == sc.anchor_count,
           "%s: seconda costruzione: stesse lunghezze", tag);
@@ -707,7 +704,7 @@ static void test_real_labels(const char *repo)
     if (!build_layout(repo, &data, &cfg, &hist, &lay))
         return;
     Render sc;
-    render_build(&sc, &data, &hist, &lay);
+    render_build(&sc, &data, &hist, &lay, NULL);
 
     bool saw_ff = false, ff_ok = false;
     for (size_t i = 0; i < sc.anchor_count; i++) {
@@ -832,6 +829,108 @@ static void test_details_wrap(void)
     free(t);
     CHECK(render_details_text(&d, &h, &lay, 5, NO_IDX, 40) == NULL,
           "dettagli: commit fuori intervallo senza testo");
+}
+
+/* Filtro degli antenati di branch2 sul repository di prova: 6 commit
+ * (C2, C1, B2, B1, B, A) su 3 corsie, con righe e corsie compatte e senza
+ * buchi; gli archi con un estremo nascosto spariscono. Il filtro non tocca
+ * ne' Layout ne' History (confronto prima/dopo). */
+static void test_filter_ancestors(const char *repo)
+{
+    GitData data;
+    GraphConfig cfg;
+    History hist;
+    Layout lay;
+    if (!build_layout(repo, &data, &cfg, &hist, &lay))
+        return;
+    Layout lay0 = lay;
+    History hist0 = hist;
+    BranchNode *br0 = xmalloc((hist.branch_count ? hist.branch_count : 1) *
+                              sizeof(BranchNode));
+    memcpy(br0, hist.branches, hist.branch_count * sizeof(BranchNode));
+    size_t b2 = history_find_branch(&hist, "branch2");
+    CHECK(b2 != NO_IDX, "filtro antenati: branch2 assente");
+    bool *mask = xmalloc((lay.commit_count ? lay.commit_count : 1) * sizeof(bool));
+
+    if (b2 != NO_IDX) {
+        render_filter_ancestors(&lay, hist.branches[b2].tip_pos, mask);
+        size_t nvis = 0;
+        for (size_t i = 0; i < lay.commit_count; i++)
+            nvis += mask[i] ? 1 : 0;
+        CHECK(nvis == 6, "filtro antenati: attesi 6 commit, ottenuti %zu", nvis);
+
+        RenderFilter f = { mask, 0 };
+        Render sc;
+        render_build(&sc, &data, &hist, &lay, &f);
+        CHECK(sc.dot_count == 6 && sc.rows == 6,
+              "filtro antenati: punti e righe compattati");
+        CHECK(sc.lane_count == 3,
+              "filtro antenati: attese 3 corsie, ottenute %zu", sc.lane_count);
+        static const char *const subj[6] = { "C2", "C1", "B2", "B1", "B", "A" };
+        static const size_t want_lane[6] = { 2, 2, 1, 1, 0, 0 };
+        bool table_ok = sc.dot_count == 6;
+        for (size_t i = 0; i < sc.dot_count && table_ok; i++) {
+            const GitCommit *c = &data.commits[sc.dots[i].commit];
+            table_ok = sc.dots[i].row == i && sc.dots[i].lane == want_lane[i] &&
+                       strncmp(c->message, subj[i], strlen(subj[i])) == 0;
+        }
+        CHECK(table_ok, "filtro antenati: tabella (soggetto, riga, corsia), "
+                        "corsie senza buchi");
+        CHECK(sc.line_count == 5, "filtro antenati: attesi 5 archi, ottenuti %zu",
+              sc.line_count);
+        for (size_t i = 0; i < sc.line_count; i++)
+            CHECK(sc.lines[i].from < lay.commit_count &&
+                      sc.lines[i].to < lay.commit_count &&
+                      mask[sc.lines[i].from] && mask[sc.lines[i].to],
+                  "filtro antenati: arco con estremo nascosto");
+        /* fra i commit visibili ci sono il branch2 e i tag base-b e v1.0-lw:
+         * un solo gruppo di branch, gli altri gruppi di branch spariscono */
+        size_t branch_anchors = 0;
+        bool b2_label = false;
+        for (size_t i = 0; i < sc.anchor_count; i++) {
+            if (sc.anchors[i].kind != RENDER_LABEL_BRANCH)
+                continue;
+            branch_anchors++;
+            b2_label = b2_label || text_has_token(sc.anchors[i].text, "branch2");
+        }
+        CHECK(branch_anchors == 1 && b2_label,
+              "filtro antenati: attesa la sola etichetta di branch2");
+        render_free(&sc);
+    }
+    /* filtro dei soli locali: tutte le punte remote sono raggiungibili dai
+     * locali, quindi nessun commit sparisce, ma i nomi remoti escono */
+    render_filter_local(&data, &hist, &lay, mask);
+    size_t nloc = 0;
+    for (size_t i = 0; i < lay.commit_count; i++)
+        nloc += mask[i] ? 1 : 0;
+    CHECK(nloc == lay.commit_count,
+          "filtro locale: attesi tutti i %zu commit visibili, ottenuti %zu",
+          lay.commit_count, nloc);
+    RenderFilter fl = { mask, RENDER_F_HIDE_REMOTES };
+    Render sc2;
+    render_build(&sc2, &data, &hist, &lay, &fl);
+    bool remote_name = false;
+    for (size_t i = 0; i < sc2.anchor_count && !remote_name; i++)
+        for (size_t b = 0; b < hist.branch_count && !remote_name; b++)
+            if (hist.branches[b].is_remote &&
+                text_has_token(sc2.anchors[i].text, hist.branches[b].name))
+                remote_name = true;
+    CHECK(!remote_name, "filtro locale: un'etichetta contiene un nome remoto");
+    bool only_local = false;
+    for (size_t i = 0; i < sc2.anchor_count && !only_local; i++)
+        only_local = sc2.anchors[i].kind == RENDER_LABEL_BRANCH &&
+                     text_has_token(sc2.anchors[i].text, "branch1") &&
+                     !sc2.anchors[i].has_remote;
+    CHECK(only_local, "filtro locale: branch1 e origin/branch1 non separati");
+    render_free(&sc2);
+
+    CHECK(memcmp(&lay, &lay0, sizeof lay) == 0, "filtro: Layout invariato");
+    CHECK(memcmp(&hist, &hist0, sizeof hist) == 0, "filtro: History invariata");
+    CHECK(memcmp(hist.branches, br0, hist.branch_count * sizeof(BranchNode)) == 0,
+          "filtro: branch invariati");
+    free(mask);
+    free(br0);
+    free_all(&data, &cfg, &hist, &lay);
 }
 
 /* ---- repository sintetici ------------------------------------------------- */
@@ -1091,6 +1190,76 @@ static bool make_random_repo(const char *path, char *err, size_t err_size)
     return kept > 0 && deleted > 0;
 }
 
+/* main A, M; origin/tmp punta a R, creato su tmp e poi cancellato dal locale:
+ * R resta raggiungibile solo dal riferimento remoto. */
+static bool make_remote_only_repo(const char *path, char *err, size_t err_size)
+{
+    back_to(g_work);
+    remove_tree(path);
+    CreateDirectoryA(path, NULL);
+    const char *init[] = {"init", "-b", "main", "-q", NULL};
+    if (!run_git(path, init, err, err_size))
+        return false;
+    long long t = 1777000000;
+    if (!commit_at(path, t, "A", err, err_size))
+        return false;
+    const char *cb[] = {"checkout", "-q", "-b", "tmp", "main", NULL};
+    if (!run_git(path, cb, err, err_size))
+        return false;
+    if (!commit_at(path, t + 60, "R", err, err_size))
+        return false;
+    const char *cr[] = {"update-ref", "refs/remotes/origin/tmp", "tmp", NULL};
+    if (!run_git(path, cr, err, err_size))
+        return false;
+    const char *cm[] = {"checkout", "-q", "main", NULL};
+    if (!run_git(path, cm, err, err_size))
+        return false;
+    if (!commit_at(path, t + 120, "M", err, err_size))
+        return false;
+    const char *dt[] = {"branch", "-D", "tmp", NULL};
+    return run_git(path, dt, err, err_size);
+}
+
+/* Filtro dei soli locali: R, raggiungibile solo dal remoto, sparisce con la
+ * sua corsia e la sua etichetta. */
+static void test_filter_local_remote_only(const char *path)
+{
+    GitData data;
+    GraphConfig cfg;
+    History hist;
+    Layout lay;
+    if (!build_layout(path, &data, &cfg, &hist, &lay))
+        return;
+    size_t r = NO_IDX;
+    for (size_t ci = 0; ci < data.commit_count && r == NO_IDX; ci++)
+        if (data.commits[ci].message[0] == 'R')
+            r = ci;
+    CHECK(r != NO_IDX, "filtro locale: commit R assente");
+
+    bool *mask = xmalloc((lay.commit_count ? lay.commit_count : 1) * sizeof(bool));
+    render_filter_local(&data, &hist, &lay, mask);
+    CHECK(r != NO_IDX && r < lay.commit_count && !mask[r],
+          "filtro locale: il commit solo-remoto non e' nascosto");
+
+    RenderFilter f = { mask, RENDER_F_HIDE_REMOTES };
+    Render sc;
+    render_build(&sc, &data, &hist, &lay, &f);
+    CHECK(sc.dot_count == 2 && sc.lane_count == 1,
+          "filtro locale: %zu commit su %zu corsie (attesi 2 su 1)",
+          sc.dot_count, sc.lane_count);
+    CHECK(sc.dot_count == 2 && sc.dots[0].row == 0 && sc.dots[1].row == 1 &&
+              sc.dots[0].lane == 0 && sc.dots[1].lane == 0,
+          "filtro locale: righe e corsie compatte");
+    bool remote = false;
+    for (size_t i = 0; i < sc.anchor_count && !remote; i++)
+        remote = strstr(sc.anchors[i].text, "origin/tmp") != NULL;
+    CHECK(!remote, "filtro locale: etichetta del remoto presente");
+    CHECK(sc.anchor_count == 1, "filtro locale: attesa la sola etichetta main");
+    render_free(&sc);
+    free(mask);
+    free_all(&data, &cfg, &hist, &lay);
+}
+
 /* ---- pytest-style entry points ------------------------------------------- */
 
 static int g_rc = 0;
@@ -1142,6 +1311,16 @@ static void run_synthetic_repos(void)
     }
     back_to(g_work);
     remove_tree(path);
+
+    snprintf(path, sizeof path, "%s\\gg_render_remote", root);
+    if (!make_remote_only_repo(path, err, sizeof err)) {
+        CHECK(false, "creazione del repo con commit solo-remoto fallita: %s",
+              err);
+    } else {
+        test_filter_local_remote_only(path);
+    }
+    back_to(g_work);
+    remove_tree(path);
 }
 
 int main(int argc, char **argv)
@@ -1154,6 +1333,7 @@ int main(int argc, char **argv)
     if (argc >= 2) {
         check_scene(argv[1], "repo di prova");
         test_real_labels(argv[1]);
+        test_filter_ancestors(argv[1]);
     } else {
         fprintf(stderr, "avviso: nessun repository di prova: uso i soli sintetici\n");
     }

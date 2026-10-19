@@ -41,6 +41,15 @@
  * alto), cosi' non si sovrappongono: i branch prima dei tag. I tag sono un
  * gruppo a parte, per colore. `text` e' di proprieta' della scena e si rilascia
  * con render_free().
+ *
+ * FILTRI. Un filtro e' una maschera di commit visibili passata a render_build
+ * (NULL = tutti). La scena si compatta: le righe sono il rango fra i commit
+ * visibili (nell'ordine topologico) e le corsie il rango fra quelle che
+ * contengono almeno un commit visibile, quindi non restano buchi; gli archi
+ * con un estremo nascosto si scartano e le etichette dei commit nascosti non
+ * si costruiscono. Il filtro cambia solo cosa si disegna: non tocca ne'
+ * Layout ne' History. `render_filter_*` riempiono la maschera, che il
+ * chiamante alloca (un elemento per commit del log).
  */
 #ifndef GG_RENDER_H
 #define GG_RENDER_H
@@ -132,11 +141,34 @@ typedef struct {
  * ciclica). Deterministico, quindi verificabile. */
 void render_lane_color(size_t lane, uint8_t out[3]);
 
+/* Filtro di visibilita' per render_build. */
+typedef struct {
+    const bool *visible; /* un elemento per commit (indice = riga); NULL = tutti */
+    unsigned flags;
+} RenderFilter;
+
+/* Nasconde le etichette dei riferimenti remoti (le loro punte possono restare
+ * visibili): e' il filtro dei soli riferimenti locali. */
+#define RENDER_F_HIDE_REMOTES 1u
+
+/* Riempie `visible` (lay->commit_count elementi) con tutti i commit visibili. */
+void render_filter_all(const Layout *lay, bool *visible);
+
+/* Visibili solo i commit raggiungibili da branch locali, tag e HEAD; con
+ * RENDER_F_HIDE_REMOTES spariscono anche le etichette dei remoti. */
+void render_filter_local(const GitData *data, const History *hist,
+                         const Layout *lay, bool *visible);
+
+/* Visibili solo i commit raggiungibili da `root` (storia ancestrale, seguendo
+ * tutti i genitori; `root` compreso), o nessuno se `root` e' fuori dal log. */
+void render_filter_ancestors(const Layout *lay, size_t root, bool *visible);
+
 /* Costruisce la scena. `data` puo' essere NULL (nessun commit di HEAD noto),
- * `hist` puo' essere NULL (nessuna etichetta); `lay` non NULL. Azzera `out`,
- * che il chiamante rilascia con render_free(). */
+ * `hist` puo' essere NULL (nessuna etichetta); `lay` non NULL. `filter` puo'
+ * essere NULL (tutti i commit visibili). Azzera `out`, che il chiamante
+ * rilascia con render_free(). */
 void render_build(Render *out, const GitData *data, const History *hist,
-                  const Layout *lay);
+                  const Layout *lay, const RenderFilter *filter);
 
 void render_free(Render *r);
 

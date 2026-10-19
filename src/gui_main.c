@@ -77,6 +77,12 @@ typedef struct {
     Render sc;
 } Model;
 
+typedef enum {
+    FILTER_NONE,
+    FILTER_LOCAL,    /* nasconde i riferimenti remoti */
+    FILTER_ANCESTORS /* solo la storia ancestrale di un branch */
+} FilterKind;
+
 typedef struct {
     View view;
     int win_w; /* dimensioni in pixel della finestra */
@@ -86,6 +92,9 @@ typedef struct {
     bool sel_is_branch; /* true: la selezione e' un branch, non un commit */
     size_t sel_commit; /* commit selezionato (per un branch: la punta) */
     size_t sel_branch; /* indice del branch selezionato */
+    FilterKind filter;
+    size_t filter_branch; /* branch del filtro ancestrale */
+    const char *repo;     /* per F5: ricaricare lo stesso repository */
 } App;
 
 static const char *const g_font_candidates[] = {
@@ -101,8 +110,10 @@ static void print_help(void)
            "              [percorso-repo]\n"
            "  percorso-repo  default: directory corrente\n"
            "comandi: click sinistro = seleziona, C = copia l'hash, Tab =\n"
-           "         pannello, Esc = deseleziona (poi esce), frecce/rotella =\n"
-           "         scorrimento, Ctrl+rotella = zoom\n");
+           "         pannello, Esc = deseleziona (poi esce), R = senza remoti,\n"
+           "         B = antenati del branch selezionato (di nuovo: tutti),\n"
+           "         A = azzera selezione e filtri, F5 = ricarica il repo,\n"
+           "         frecce/rotella = scorrimento, Ctrl+rotella = zoom\n");
 }
 
 static float px(const View *v, double x)
@@ -290,7 +301,7 @@ static bool model_load(Model *m, const char *repo, char *err, size_t err_size)
         return false;
     }
     layout_build(&m->lay, &m->hist);
-    render_build(&m->sc, &m->data, &m->hist, &m->lay);
+    render_build(&m->sc, &m->data, &m->hist, &m->lay, NULL);
     return true;
 }
 
@@ -304,6 +315,14 @@ static void model_free(Model *m)
     memset(m, 0, sizeof *m);
 }
 
+static void app_clear_selection(App *app)
+{
+    app->sel_active = false;
+    app->sel_is_branch = false;
+    app->sel_commit = NO_IDX;
+    app->sel_branch = NO_IDX;
+}
+
 /* Riporta l'area del grafo alla larghezza della finestra (il pannello, se
  * acceso, toglie PANEL_W) e corregge lo scorrimento. */
 static void app_resize(Model *m, App *app)
@@ -315,12 +334,86 @@ static void app_resize(Model *m, App *app)
     view_clamp(&app->view, m->sc.lane_count, m->sc.rows);
 }
 
-static void app_clear_selection(App *app)
+/* Ricostruisce la scena col filtro corrente. I filtri sono maschere di commit
+ * visibili: Layout e History restano intatti. */
+static void scene_rebuild(Model *m, App *app)
 {
-    app->sel_active = false;
-    app->sel_is_branch = false;
-    app->sel_commit = NO_IDX;
-    app->sel_branch = NO_IDX;
+    render_free(&m->sc);
+    bool *mask = NULL;
+    RenderFilter f;
+    memset(&f, 0, sizeof f);
+    if (app->filter == FILTER_LOCAL) {
+        mask = xmalloc((m->lay.commit_count ? m->lay.commit_count : 1) *
+                       sizeof(bool));
+        render_filter_local(&m->data, &m->hist, &m->lay, mask);
+        f.visible = mask;
+        f.flags = RENDER_F_HIDE_REMOTES;
+    } else if (app->filter == FILTER_ANCESTORS &&
+               app->filter_branch < m->hist.branch_count) {
+        mask = xmalloc((m->lay.commit_count ? m->lay.commit_count : 1) *
+                       sizeof(bool));
+        render_filter_ancestors(&m->lay,
+                                m->hist.branches[app->filter_branch].tip_pos,
+                                mask);
+        f.visible = mask;
+    }
+    if (mask) {
+        render_build(&m->sc, &m->data, &m->hist, &m->lay, &f);
+        free(mask);
+    } else {
+        render_build(&m->sc, &m->data, &m->hist, &m->lay, NULL);
+    }
+    app_resize(m, app);
+}
+
+static void app_apply_filter(Model *m, App *app, FilterKind kind, size_t branch)
+{
+    app->filter = kind;
+    app->filter_branch = (kind == FILTER_ANCESTORS) ? branch : NO_IDX;
+    scene_rebuild(m, app);
+}
+
+/* Tasto A: via selezione e filtri, vista intera. */
+static void app_reset(Model *m, App *app)
+{
+    app_clear_selection(app);
+    app->filter = FILTER_NONE;
+    app->filter_branch = NO_IDX;
+    scene_rebuild(m, app);
+}
+
+/* F5: rilegge il repository e ricostruisce modello, layout e scena. Il filtro
+ * per nome sopravvive se il branch esiste ancora; la selezione no (gli indici
+ * dei commit cambiano). */
+static bool app_reload(Model *m, App *app)
+{
+    char keep[256] = "";
+    FilterKind kind = app->filter;
+    if (kind == FILTER_ANCESTORS && app->filter_branch < m->hist.branch_count)
+        snprintf(keep, sizeof keep, "%s",
+                 m->hist.branches[app->filter_branch].name);
+    app_clear_selection(app);
+    model_free(m);
+    char err[1024];
+    if (!model_load(m, app->repo, err, sizeof err)) {
+        fprintf(stderr, "errore: %s\n", err);
+        app->filter = FILTER_NONE;
+        app->filter_branch = NO_IDX;
+        return false;
+    }
+    app->filter = FILTER_NONE;
+    app->filter_branch = NO_IDX;
+    if (kind == FILTER_LOCAL) {
+        app->filter = FILTER_LOCAL;
+    } else if (kind == FILTER_ANCESTORS) {
+        size_t bi = history_find_branch(&m->hist, keep);
+        if (bi != NO_IDX && m->hist.branches[bi].tip_pos != NO_IDX) {
+            app->filter = FILTER_ANCESTORS;
+            app->filter_branch = bi;
+        }
+    }
+    scene_rebuild(m, app);
+    return true;
 }
 
 static void app_select_commit(Model *m, App *app, size_t commit)
@@ -414,11 +507,18 @@ static void draw_status(SDL_Renderer *ren, TTF_Font *font, Model *m, App *app)
         gitdata_short_hash(m->data.commits[app->sel_commit].hash, 8, sh);
         snprintf(sel, sizeof sel, "commit %s", sh);
     }
+    char filt[220] = "nessuno";
+    if (app->filter == FILTER_LOCAL)
+        snprintf(filt, sizeof filt, "local (senza remoti)");
+    else if (app->filter == FILTER_ANCESTORS &&
+             app->filter_branch < m->hist.branch_count)
+        snprintf(filt, sizeof filt, "antenati: %s",
+                 m->hist.branches[app->filter_branch].name);
     char line[512];
     snprintf(line, sizeof line,
-             "commit visibili: %zu   corsie: %zu   filtro: nessuno   "
+             "commit visibili: %zu   corsie: %zu   filtro: %s   "
              "selezione: %s",
-             m->sc.dot_count, m->sc.lane_count, sel);
+             m->sc.dot_count, m->sc.lane_count, filt, sel);
     if (!font)
         return;
     TTF_SetFontSize(font, STATUS_PT);
@@ -627,6 +727,26 @@ static void handle_key(const SDL_KeyboardEvent *k, Model *m, App *app,
             SDL_SetClipboardText(m->data.commits[app->sel_commit].hash);
         return;
     }
+    if (k->key == SDLK_R) {
+        app_apply_filter(m, app,
+                         app->filter == FILTER_LOCAL ? FILTER_NONE : FILTER_LOCAL,
+                         NO_IDX);
+        return;
+    }
+    if (k->key == SDLK_B) {
+        if (app->sel_active && app->sel_is_branch) {
+            if (app->filter == FILTER_ANCESTORS &&
+                app->filter_branch == app->sel_branch)
+                app_apply_filter(m, app, FILTER_NONE, NO_IDX);
+            else
+                app_apply_filter(m, app, FILTER_ANCESTORS, app->sel_branch);
+        }
+        return;
+    }
+    if (k->key == SDLK_A) {
+        app_reset(m, app);
+        return;
+    }
     if (k->key == SDLK_DOWN)
         v->off_y += 1;
     else if (k->key == SDLK_UP)
@@ -753,6 +873,8 @@ int main(int argc, char **argv)
     memset(&app, 0, sizeof app);
     app.sel_commit = NO_IDX;
     app.sel_branch = NO_IDX;
+    app.filter_branch = NO_IDX;
+    app.repo = opt.repo;
     app.view.off_x = 0;
     app.view.off_y = 0;
     app.view.zoom = 1.0;
@@ -807,9 +929,14 @@ int main(int argc, char **argv)
             do {
                 if (ev.type == SDL_EVENT_QUIT)
                     running = false;
-                else if (ev.type == SDL_EVENT_KEY_DOWN)
-                    handle_key(&ev.key, &m, &app, &running);
-                else if (ev.type == SDL_EVENT_MOUSE_WHEEL) {
+                else if (ev.type == SDL_EVENT_KEY_DOWN) {
+                    if (ev.key.key == SDLK_F5) {
+                        if (!app_reload(&m, &app))
+                            running = false;
+                    } else {
+                        handle_key(&ev.key, &m, &app, &running);
+                    }
+                } else if (ev.type == SDL_EVENT_MOUSE_WHEEL) {
                     if (SDL_GetModState() & SDL_KMOD_CTRL) {
                         app.view.zoom *= (ev.wheel.y > 0) ? 1.1 : 1 / 1.1;
                         app_resize(&m, &app);

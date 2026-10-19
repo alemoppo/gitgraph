@@ -19,6 +19,7 @@
 #include "gitdata.h"
 #include "history.h"
 #include "layout.h"
+#include "render.h"
 #include "util.h"
 
 #include <stdarg.h>
@@ -268,6 +269,19 @@ int main(int argc, char **argv)
               lay.lanes, h1.branch_count);
         CHECK(lay.anon_lane == (size_t)-1 && lay.anon_lane_count == 0,
               "il repo di scala non ha commit senza proprietario");
+        /* filtro locale (maschera di commit visibili): deve restare lineare.
+         * Il repo grande ha 50.000 commit, oltre i 31.000 del requisito. */
+        bool *mask = xmalloc((lay.commit_count ? lay.commit_count : 1) *
+                             sizeof(bool));
+        t0 = clock();
+        render_filter_local(&data, &h1, &lay, mask);
+        double t_filter = seconds_since(t0);
+        printf("filtro locale: %.2f ms su %zu commit (limite 100 ms)\n",
+               t_filter * 1000.0, lay.commit_count);
+        CHECK(t_filter < 0.100,
+              "filtro locale troppo lento: %.2f ms su %zu commit",
+              t_filter * 1000.0, lay.commit_count);
+        free(mask);
         layout_free(&lay);
     }
     CHECK(t_load + t_build <= budget,

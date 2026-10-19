@@ -78,10 +78,12 @@ static int cmp_entry(const void *pa, const void *pb)
 }
 
 /* Costruisce le etichette: una per (commit puntato, tipo). I riferimenti di un
- * branch con punta fuori dal log non producono etichetta (non c'e' una cella a
- * cui ancorarli). */
+ * branch con punta fuori dal log o nascosta dal filtro non producono etichetta
+ * (non c'e' una cella a cui ancorarli); con RENDER_F_HIDE_REMOTES i nomi
+ * remoti non entrano nei gruppi. Le coordinate sono quelle compatte. */
 static void build_labels(Render *out, const GitData *data, const History *hist,
-                         const Layout *lay)
+                         const Layout *lay, const size_t *row_of,
+                         const size_t *lane_of, unsigned flags)
 {
     size_t cap = (hist ? hist->branch_count : 0) +
                  (data ? data->ref_count : 0);
@@ -89,8 +91,11 @@ static void build_labels(Render *out, const GitData *data, const History *hist,
     size_t ne = 0;
     if (hist) {
         for (size_t i = 0; i < hist->branch_count; i++) {
+            if ((flags & RENDER_F_HIDE_REMOTES) && hist->branches[i].is_remote)
+                continue;
             size_t row = lay->nodes[i].row;
-            if (row == NO_IDX || row >= lay->rows)
+            if (row == NO_IDX || row >= lay->commit_count ||
+                row_of[row] == NO_IDX)
                 continue;
             ents[ne].commit = row;
             ents[ne].kind = RENDER_LABEL_BRANCH;
@@ -106,7 +111,8 @@ static void build_labels(Render *out, const GitData *data, const History *hist,
             if (data->refs[i].kind != REF_TAG)
                 continue;
             size_t ci = gitdata_find_commit(data, data->refs[i].target);
-            if (ci == NO_IDX || ci >= lay->rows)
+            if (ci == NO_IDX || ci >= lay->commit_count ||
+                row_of[ci] == NO_IDX)
                 continue;
             ents[ne].commit = ci;
             ents[ne].kind = RENDER_LABEL_TAG;
@@ -149,9 +155,9 @@ static void build_labels(Render *out, const GitData *data, const History *hist,
                 i++;
             }
             RenderAnchor *an = &out->anchors[gi++];
-            an->p.x = (double)lay->commits[commit].lane;
-            an->p.y = (double)commit;
-            an->row = commit;
+            an->p.x = (double)lane_of[lay->commits[commit].lane];
+            an->p.y = (double)row_of[commit];
+            an->row = row_of[commit];
             an->commit = commit;
             an->slot = slot++;
             an->kind = kind;
@@ -167,48 +173,187 @@ static void build_labels(Render *out, const GitData *data, const History *hist,
     free(ents);
 }
 
+/* Raggiungibilita' in avanti dai genitori: segna i commit visibili partendo
+ * dalle radici, seguendo gli archi tra commit (child -> parent) al contrario.
+ * Adiacenza in O(commit + archi), cosi' il filtro resta lineare. */
+static void reachable_from(const Layout *lay, bool *visible,
+                           const size_t *roots, size_t root_count)
+{
+    size_t n = lay->commit_count;
+    if (n == 0)
+        return;
+    size_t *head = xmalloc(n * sizeof(size_t));
+    for (size_t i = 0; i < n; i++)
+        head[i] = NO_IDX;
+    size_t *next =
+        xmalloc((lay->cedge_count ? lay->cedge_count : 1) * sizeof(size_t));
+    for (size_t e = 0; e < lay->cedge_count; e++) {
+        size_t from = lay->cedges[e].from;
+        size_t to = lay->cedges[e].to;
+        if (from >= n || to >= n)
+            continue;
+        next[e] = head[from];
+        head[from] = e;
+    }
+    size_t *stack = xmalloc(n * sizeof(size_t));
+    size_t sp = 0;
+    for (size_t i = 0; i < root_count; i++) {
+        size_t r = roots[i];
+        if (r < n && !visible[r]) {
+            visible[r] = true;
+            stack[sp++] = r;
+        }
+    }
+    while (sp > 0) {
+        size_t ci = stack[--sp];
+        for (size_t e = head[ci]; e != NO_IDX; e = next[e]) {
+            size_t to = lay->cedges[e].to;
+            if (to < n && !visible[to]) {
+                visible[to] = true;
+                stack[sp++] = to;
+            }
+        }
+    }
+    free(head);
+    free(next);
+    free(stack);
+}
+
+void render_filter_all(const Layout *lay, bool *visible)
+{
+    memset(visible, 1, lay->commit_count * sizeof(bool));
+}
+
+void render_filter_local(const GitData *data, const History *hist,
+                         const Layout *lay, bool *visible)
+{
+    size_t n = lay->commit_count;
+    memset(visible, 0, n * sizeof(bool));
+    if (n == 0)
+        return;
+    size_t cap = (hist ? hist->branch_count : 0) +
+                 (data ? data->ref_count : 0) + 1;
+    size_t *roots = xmalloc(cap * sizeof(size_t));
+    size_t nr = 0;
+    if (hist) {
+        for (size_t i = 0; i < hist->branch_count; i++) {
+            if (hist->branches[i].is_remote)
+                continue;
+            size_t tip = hist->branches[i].tip_pos;
+            if (tip != NO_IDX && tip < n)
+                roots[nr++] = tip;
+        }
+    }
+    if (data) {
+        for (size_t i = 0; i < data->ref_count; i++) {
+            if (data->refs[i].kind != REF_TAG || !data->refs[i].target)
+                continue;
+            size_t ci = gitdata_find_commit(data, data->refs[i].target);
+            if (ci != NO_IDX && ci < n)
+                roots[nr++] = ci;
+        }
+        if (data->head_hash) {
+            size_t ci = gitdata_find_commit(data, data->head_hash);
+            if (ci != NO_IDX && ci < n)
+                roots[nr++] = ci;
+        }
+    }
+    reachable_from(lay, visible, roots, nr);
+    free(roots);
+}
+
+void render_filter_ancestors(const Layout *lay, size_t root, bool *visible)
+{
+    size_t n = lay->commit_count;
+    memset(visible, 0, n * sizeof(bool));
+    if (root >= n)
+        return;
+    reachable_from(lay, visible, &root, 1);
+}
+
 void render_build(Render *out, const GitData *data, const History *hist,
-                  const Layout *lay)
+                  const Layout *lay, const RenderFilter *filter)
 {
     memset(out, 0, sizeof *out);
     if (!lay)
         return;
-    out->lane_count = lay->lanes;
-    out->rows = lay->rows;
+    size_t n = lay->commit_count;
+    const bool *vis = filter ? filter->visible : NULL;
+    unsigned flags = filter ? filter->flags : 0;
+    /* Senza filtro la scena resta quella del layout, corsie vuote comprese;
+     * con un filtro si compatta: righe e corsie sono il rango fra i visibili,
+     * quindi non restano buchi. */
+    bool compact = (filter != NULL);
+
+    /* righe visibili: il rango fra i visibili, nell'ordine topologico */
+    size_t *row_of = xmalloc((n ? n : 1) * sizeof(size_t));
+    size_t nvis = 0;
+    for (size_t ci = 0; ci < n; ci++) {
+        if (compact && vis && !vis[ci]) {
+            row_of[ci] = NO_IDX;
+            continue;
+        }
+        row_of[ci] = nvis++;
+    }
+
+    /* corsie visibili: il rango fra quelle che hanno almeno un commit visibile */
+    size_t nlanes = lay->lanes;
+    bool *used = xcalloc(nlanes ? nlanes : 1, sizeof(bool));
+    if (compact) {
+        for (size_t ci = 0; ci < n; ci++)
+            if (row_of[ci] != NO_IDX)
+                used[lay->commits[ci].lane] = true;
+    } else {
+        for (size_t l = 0; l < nlanes; l++)
+            used[l] = true;
+    }
+    size_t *lane_of = xmalloc((nlanes ? nlanes : 1) * sizeof(size_t));
+    size_t nl = 0;
+    for (size_t l = 0; l < nlanes; l++)
+        lane_of[l] = used[l] ? nl++ : NO_IDX;
+    out->lane_count = nl;
+    out->rows = compact ? nvis : lay->rows;
 
     size_t head_ci = NO_IDX;
     if (data && data->head_hash)
         head_ci = gitdata_find_commit(data, data->head_hash);
 
-    /* punti dei commit: uno per cella, alla corsia e riga del layout */
-    out->dot_count = lay->commit_count;
-    out->dots = xcalloc(out->dot_count ? out->dot_count : 1, sizeof(RenderDot));
-    for (size_t ci = 0; ci < lay->commit_count; ci++) {
+    /* punti dei commit visibili: uno per cella, alla corsia e riga compatte */
+    out->dot_count = nvis;
+    out->dots = xcalloc(nvis ? nvis : 1, sizeof(RenderDot));
+    for (size_t ci = 0; ci < n; ci++) {
+        if (row_of[ci] == NO_IDX)
+            continue;
         const LayoutCommit *cell = &lay->commits[ci];
-        RenderDot *d = &out->dots[ci];
-        d->p.x = (double)cell->lane;
-        d->p.y = (double)cell->row;
-        d->lane = cell->lane;
-        d->row = cell->row;
+        RenderDot *d = &out->dots[row_of[ci]];
+        d->p.x = (double)lane_of[cell->lane];
+        d->p.y = (double)row_of[ci];
+        d->lane = lane_of[cell->lane];
+        d->row = row_of[ci];
         d->commit = ci;
         d->head = (ci == head_ci);
         d->anon = (cell->owner == NO_IDX);
         d->merge_target = false;
     }
 
-    /* archi: uno per ogni arco tra commit. La diramazione di un ramo con padre
-     * ambiguo si disegna tratteggiata (e' l'ipotesi del layout). */
+    /* archi: uno per ogni arco con entrambi gli estremi visibili. La
+     * diramazione di un ramo con padre ambiguo si disegna tratteggiata (e' la
+     * ipotesi del layout). */
     size_t cap = lay->cedge_count;
     out->lines = xcalloc(cap ? cap : 1, sizeof(RenderLine));
-    size_t nl = 0;
+    size_t nlines = 0;
 
     for (size_t e = 0; e < lay->cedge_count; e++) {
         const LayoutCommitEdge *ce = &lay->cedges[e];
-        if (ce->from >= lay->commit_count || ce->to >= lay->commit_count)
+        if (ce->from >= n || ce->to >= n)
             continue;
-        RenderLine *ln = &out->lines[nl];
-        RenderPt a = { (double)lay->commits[ce->from].lane, (double)ce->from };
-        RenderPt b = { (double)lay->commits[ce->to].lane, (double)ce->to };
+        if (row_of[ce->from] == NO_IDX || row_of[ce->to] == NO_IDX)
+            continue;
+        RenderLine *ln = &out->lines[nlines];
+        RenderPt a = { (double)lane_of[lay->commits[ce->from].lane],
+                       (double)row_of[ce->from] };
+        RenderPt b = { (double)lane_of[lay->commits[ce->to].lane],
+                       (double)row_of[ce->to] };
         ln->from = ce->from;
         ln->to = ce->to;
         switch (ce->kind) {
@@ -223,24 +368,28 @@ void render_build(Render *out, const GitData *data, const History *hist,
             break;
         }
         ln->n = route_line(ln->pts, a, b, ln->kind);
-        ln->lane = lay->commits[ce->from].lane;
+        ln->lane = lane_of[lay->commits[ce->from].lane];
         ln->dashed = false;
         if (ln->kind == RENDER_LINE_MERGE_PARENT)
-            out->dots[ce->to].merge_target = true;
+            out->dots[row_of[ce->to]].merge_target = true;
         if (ln->kind == RENDER_LINE_BRANCH && hist) {
             size_t owner = lay->commits[ce->from].owner;
             if (owner != NO_IDX && owner < hist->branch_count &&
                 hist->branches[owner].state == PARENT_AMBIGUOUS)
                 ln->dashed = true;
         }
-        nl++;
+        nlines++;
     }
-    out->line_count = nl;
+    out->line_count = nlines;
 
-    /* etichette: un gruppo per (commit puntato, tipo), alla corsia del commit.
-     * I nomi dello stesso gruppo si uniscono; i gruppi dello stesso commit si
-     * impilano con uno slot crescente (branch prima dei tag). */
-    build_labels(out, data, hist, lay);
+    /* etichette: un gruppo per (commit puntato visibile, tipo), alla corsia
+     * compatta del commit. I nomi dello stesso gruppo si uniscono; i gruppi
+     * dello stesso commit si impilano con uno slot crescente (branch prima dei
+     * tag). */
+    build_labels(out, data, hist, lay, row_of, lane_of, flags);
+    free(row_of);
+    free(lane_of);
+    free(used);
 }
 
 void render_free(Render *r)
