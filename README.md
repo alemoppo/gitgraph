@@ -364,9 +364,14 @@ Cosa si vede:
   (palette ciclica di 16 colori, deterministica). Il commit di HEAD ha un
   anello bianco; i commit anonimi (senza proprietario) hanno un colore
   attenuato.
-- **Archi**: il primo genitore e' un segmento verticale; diramazione e
-  genitore di merge sono spezzate a gomito (figlio, mezzeria, corsia del
-  genitore, genitore), per non passare sopra i nodi.
+- **Archi**: ogni riga ha un solo commit, quindi il gomito sta **su una riga**
+  e non su una mezzeria. Il primo genitore e' un segmento verticale; la
+  **diramazione** e' verticale nella corsia del figlio fino alla riga del
+  genitore, poi orizzontale fino alla corsia del genitore; il **genitore di
+  merge** e' orizzontale alla riga del commit di merge fino alla corsia del
+  genitore, poi verticale in quella corsia fino al genitore. Le due proprieta'
+  (nessun punto dentro un tratto orizzontale, nessun punto di un'altra catena
+  dentro un tratto verticale) sono verificate dal test `render`.
 - **Archi suggeriti**: le diramazioni ambigue (padre suggerito, vedi il
   modello) sono **tratteggiate**, distinte dagli archi certi. Gli archi di
   paternita' a livello di branch non si duplicano: coincidono con la catena dei
@@ -466,12 +471,18 @@ Sedici test, nessuno con finestra:
 5. `render` verifica la geometria della scena (fase 5): un punto per commit
    alla sua corsia e riga (con indice del commit, HEAD marcato, anonimi
    marcati), un arco per ogni arco tra commit con gli estremi sulle celle, il
-   primo genitore verticale di 2 punti, diramazione e merge a gomito di 4 punti
-   con la mezzeria esatta (verificati anche su un layout costruito a mano, con
-   coordinate attese), le diramazioni suggerite tratteggiate (comprese le punte
-   fuori dal log, che non producono arco), un'ancora per branch, il colore di
-   corsia deterministico (palette ciclica di 16), il determinismo (due
-   costruzioni identiche) e un layout vuoto che produce una scena vuota;
+   primo genitore verticale di 2 punti, diramazione e merge di 3 punti con il
+   gomito **sulla riga** giusta (verificati anche su un layout costruito a
+   mano, con coordinate attese), le diramazioni suggerite tratteggiate
+   (comprese le punte fuori dal log, che non producono arco), un'ancora per
+   branch, il colore di corsia deterministico (palette ciclica di 16), il
+   determinismo (due costruzioni identiche) e un layout vuoto che produce una
+   scena vuota. Sul repository di prova e su tre repository sintetici costruiti
+   dal test (`x`/`y`/`z` cancellati, 30 rami mergiati e cancellati in
+   sequenza, un repository pseudo-casuale con seme fisso e rami che si
+   sovrappongono) verifica che **nessun punto stia dentro un tratto
+   orizzontale** e che **nessun punto di un'altra catena stia dentro un tratto
+   verticale**;
 6. `dump_smoke` esegue lo strumento di dump;
 7. `invariance` verifica che la genealogia non dipenda dall'ordine alfabetico:
    per ogni gruppo di branch con nidificazione o fratelli (nel repository di

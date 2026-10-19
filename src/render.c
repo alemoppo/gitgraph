@@ -26,26 +26,32 @@ void render_lane_color(size_t lane, uint8_t out[3])
     out[2] = c[2];
 }
 
-/* Riempie una polilinea: verticale se le corsie coincidono o se non serve il
- * gomito, altrimenti figlio -> mezzeria -> corsia del genitore -> genitore. Il
- * gomito serve a distinguere gli archi che cambiano corsia (diramazione, merge,
- * suggerito): la mezzeria evita che l'arco passi sopra il nodo di partenza. */
+/* Riempie una polilinea secondo la convenzione della scena. Ogni riga ha un
+ * solo commit, quindi un tratto orizzontale all'altezza di una riga non
+ * attraversa mai un nodo estraneo:
+ *  - stessa corsia: verticale di 2 punti;
+ *  - diramazione (RENDER_LINE_BRANCH): verticale nella corsia del figlio fino
+ *    alla riga del genitore, poi orizzontale fino alla corsia del genitore;
+ *  - merge (e suggerito): orizzontale alla riga del figlio fino alla corsia del
+ *    genitore, poi verticale in quella corsia fino al genitore. */
 static size_t route_line(RenderPt pts[RENDER_MAX_POINTS], RenderPt a, RenderPt b,
-                         bool elbow)
+                         RenderLineKind kind)
 {
-    if (elbow && a.x != b.x) {
-        double my = (a.y + b.y) / 2.0;
-        pts[0] = a;
-        pts[1].x = a.x;
-        pts[1].y = my;
-        pts[2].x = b.x;
-        pts[2].y = my;
-        pts[3] = b;
-        return 4;
-    }
     pts[0] = a;
-    pts[1] = b;
-    return 2;
+    if (a.x == b.x) {
+        pts[1] = b;
+        return 2;
+    }
+    if (kind == RENDER_LINE_BRANCH) {
+        pts[1].x = a.x;
+        pts[1].y = b.y;
+        pts[2] = b;
+        return 3;
+    }
+    pts[1].x = b.x;
+    pts[1].y = a.y;
+    pts[2] = b;
+    return 3;
 }
 
 void render_build(Render *out, const GitData *data, const History *hist,
@@ -106,8 +112,7 @@ void render_build(Render *out, const GitData *data, const History *hist,
             ln->kind = RENDER_LINE_BRANCH;
             break;
         }
-        bool elbow = (ln->kind != RENDER_LINE_FIRST_PARENT);
-        ln->n = route_line(ln->pts, a, b, elbow);
+        ln->n = route_line(ln->pts, a, b, ln->kind);
         ln->lane = lay->commits[ce->from].lane;
         ln->dashed = false;
         nl++;
@@ -124,7 +129,7 @@ void render_build(Render *out, const GitData *data, const History *hist,
         RenderPt a = { (double)cn->lane, (double)cn->row };
         RenderPt b = { (double)pn->lane, (double)pn->row };
         ln->kind = RENDER_LINE_SUGGESTED;
-        ln->n = route_line(ln->pts, a, b, true);
+        ln->n = route_line(ln->pts, a, b, ln->kind);
         ln->lane = cn->lane;
         ln->dashed = true;
         nl++;

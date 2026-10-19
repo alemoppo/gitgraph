@@ -11,12 +11,19 @@
  * cioe' verso il basso come nel dump). Il passaggio a pixel (margini, passo di
  * corsia e di riga, zoom, scorrimento) e' del disegnatore.
  *
- * ARCHI. Ogni arco e' una polilinea di al piu' RENDER_MAX_POINTS punti:
+ * ARCHI. Ogni arco e' una polilinea di al piu' RENDER_MAX_POINTS punti. Poiche'
+ * ogni riga ha un solo commit, un tratto orizzontale all'altezza di una riga
+ * non attraversa mai un nodo estraneo: conviene quindi appoggiare il gomito a
+ * una riga, non a una mezzeria.
  *  - primo genitore (stessa corsia): segmento verticale di 2 punti;
- *  - diramazione o genitore di merge (corsia diversa): spezzata a gomito di 4
- *    punti, figlio -> mezzeria -> corsia del genitore -> genitore;
- *  - estero: l'arco suggerito (tratteggiato) fra due punte di branch, quando il
- *    caso e' ambiguo. E' l'unico arco a livello di branch: gli archi di
+ *  - diramazione (primo genitore in un'altra corsia): verticale nella corsia
+ *    del figlio fino alla riga del genitore, poi orizzontale a quella riga fino
+ *    alla corsia del genitore (3 punti);
+ *  - genitore di merge: orizzontale alla riga del commit di merge fino alla
+ *    corsia del genitore, poi verticale in quella corsia fino al genitore
+ *    (3 punti);
+ *  - estero: l'arco suggerito (tratteggiato) fra due punte di branch, finche'
+ *    il caso e' ambiguo. E' l'unico arco a livello di branch: gli archi di
  *    paternita' coincidono con la catena dei commit e non si duplicano.
  *
  * ETICHETTE. Un'ancora per branch, alla posizione del suo nodo (riga della
@@ -47,11 +54,11 @@ typedef enum {
     RENDER_LINE_SUGGESTED     /* arco suggerito a livello di branch (tratteggio) */
 } RenderLineKind;
 
-#define RENDER_MAX_POINTS 4
+#define RENDER_MAX_POINTS 3
 
 typedef struct {
     RenderPt pts[RENDER_MAX_POINTS];
-    size_t n;      /* punti usati (2 o 4) */
+    size_t n;      /* punti usati (2 o 3) */
     size_t lane;   /* corsia del figlio: decide il colore */
     bool dashed;   /* true per gli archi suggeriti */
     RenderLineKind kind;
