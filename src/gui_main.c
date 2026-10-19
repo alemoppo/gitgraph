@@ -193,7 +193,7 @@ static void draw_label(SDL_Renderer *ren, TTF_Font *font, float x, float y,
 }
 
 static void draw_frame(SDL_Renderer *ren, TTF_Font *font, const View *v,
-                       const Render *sc, const History *hist)
+                       const Render *sc)
 {
     SDL_SetRenderDrawColor(ren, 18, 20, 26, 255);
     SDL_RenderClear(ren);
@@ -251,31 +251,39 @@ static void draw_frame(SDL_Renderer *ren, TTF_Font *font, const View *v,
         fill_circle(ren, cx, cy, r);
     }
 
-    /* etichette dei riferimenti */
+    /* etichette dei riferimenti: gruppi uniti, impilati con lo slot */
     if (font && v->zoom >= 0.5) {
         TTF_SetFontSize(font, LABEL_PT * (float)v->zoom);
         int fh = TTF_GetFontHeight(font);
+        float slot_h = (float)fh + 4.0f;
         for (size_t i = 0; i < sc->anchor_count; i++) {
             const RenderAnchor *a = &sc->anchors[i];
             if (a->row == (size_t)-1 || (double)a->row < r0 ||
                 (double)a->row > r1)
                 continue;
-            const char *name = hist->branches[a->branch].name;
             float x = px(v, a->p.x) + 9.0f * (float)v->zoom;
-            float y = py(v, a->p.y) - fh / 2.0f;
+            float y = py(v, a->p.y) - fh / 2.0f + (float)a->slot * slot_h;
             SDL_Color fg = { 235, 235, 240, 255 };
             Uint8 br = 30, bgc = 34, bb = 44;
-            if (a->is_remote)
-                fg.r = fg.g = fg.b = 170;
-            if (a->is_head) {
+            if (a->kind == RENDER_LABEL_TAG) {
+                /* tag: colore diverso dai branch */
+                fg.r = 226;
+                fg.g = 200;
+                fg.b = 120;
+                br = 56;
+                bgc = 46;
+                bb = 18;
+            } else if (a->is_head) {
                 fg.r = 255;
                 fg.g = 230;
                 fg.b = 120;
                 br = 60;
                 bgc = 52;
                 bb = 20;
+            } else if (a->has_remote) {
+                fg.r = fg.g = fg.b = 170;
             }
-            draw_label(ren, font, x, y, fg, br, bgc, bb, name);
+            draw_label(ren, font, x, y, fg, br, bgc, bb, a->text);
         }
     }
 }
@@ -486,7 +494,7 @@ int main(int argc, char **argv)
             if (!running)
                 break;
             SDL_GetWindowSizeInPixels(win, &view.width, &view.height);
-            draw_frame(ren, font, &view, &sc, &hist);
+            draw_frame(ren, font, &view, &sc);
             SDL_RenderPresent(ren);
         }
         if (opt.screenshot) {
@@ -509,7 +517,7 @@ int main(int argc, char **argv)
         float drag_x = 0, drag_y = 0;
 
         SDL_GetWindowSizeInPixels(win, &view.width, &view.height);
-        draw_frame(ren, font, &view, &sc, &hist);
+        draw_frame(ren, font, &view, &sc);
         SDL_RenderPresent(ren);
 
         while (running) {
@@ -547,7 +555,7 @@ int main(int argc, char **argv)
                 }
             } while (SDL_PollEvent(&ev));
             SDL_GetWindowSizeInPixels(win, &view.width, &view.height);
-            draw_frame(ren, font, &view, &sc, &hist);
+            draw_frame(ren, font, &view, &sc);
             SDL_RenderPresent(ren);
         }
     }

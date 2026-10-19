@@ -26,9 +26,16 @@
  *    il caso e' ambiguo. E' l'unico arco a livello di branch: gli archi di
  *    paternita' coincidono con la catena dei commit e non si duplicano.
  *
- * ETICHETTE. Un'ancora per branch, alla posizione del suo nodo (riga della
- * punta, corsia della famiglia). Il testo (il nome del riferimento) lo aggiunge
- * il disegnatore, che ha i nomi.
+ * ETICHETTE. Le etichette sono raggruppate per commit: ogni gruppo ha come
+ * ancora la corsia e la riga del commit puntato (LayoutCommit.lane), non la
+ * corsia del branch, cosi' un branch riallineato (fast-forward) e i suoi alias
+ * compaiono sul commit di main dove sono davvero. I riferimenti dello stesso
+ * tipo sullo stesso commit (per esempio un locale e il suo remoto con la stessa
+ * punta) si uniscono in una sola etichetta con i nomi separati da ", ". I
+ * gruppi dello stesso commit si impilano con uno slot crescente (0 = il piu' in
+ * alto), cosi' non si sovrappongono: i branch prima dei tag. I tag sono un
+ * gruppo a parte, per colore. `text` e' di proprieta' della scena e si rilascia
+ * con render_free().
  */
 #ifndef GG_RENDER_H
 #define GG_RENDER_H
@@ -73,12 +80,20 @@ typedef struct {
     bool anon;     /* nessun branch lo reclama */
 } RenderDot;
 
+typedef enum {
+    RENDER_LABEL_BRANCH, /* riferimenti locali e remoti del commit */
+    RENDER_LABEL_TAG     /* tag del commit */
+} RenderLabelKind;
+
 typedef struct {
-    RenderPt p;
-    size_t row;    /* riga del nodo, SIZE_MAX se fuori dal log */
-    size_t branch; /* indice in History.branches */
-    bool is_head;
-    bool is_remote;
+    RenderPt p;     /* corsia e riga del commit puntato */
+    size_t row;     /* riga del commit puntato, SIZE_MAX se fuori dal log */
+    size_t commit;  /* indice del commit puntato, SIZE_MAX se fuori dal log */
+    size_t slot;    /* posizione nella pila dello stesso commit (0 = in alto) */
+    RenderLabelKind kind;
+    char *text;       /* nomi uniti da ", " (es. "branch1, origin/branch1") */
+    bool is_head;     /* un riferimento del gruppo e' il branch corrente */
+    bool has_remote;  /* almeno un riferimento del gruppo e' remoto */
 } RenderAnchor;
 
 typedef struct {

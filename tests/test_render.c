@@ -309,6 +309,84 @@ static void free_all(GitData *data, GraphConfig *cfg, History *hist,
     gitdata_free(data);
 }
 
+/* ---- etichette ------------------------------------------------------------ */
+
+/* Il testo contiene `name` come nome a se' stante (separatore ", ")? */
+static bool text_has_token(const char *text, const char *name)
+{
+    size_t nl = strlen(name);
+    const char *p = text;
+    for (;;) {
+        const char *comma = strstr(p, ", ");
+        size_t seg = comma ? (size_t)(comma - p) : strlen(p);
+        if (seg == nl && strncmp(p, name, nl) == 0)
+            return true;
+        if (!comma)
+            return false;
+        p = comma + 2;
+    }
+}
+
+static int cmp_size(const void *pa, const void *pb)
+{
+    size_t a = *(const size_t *)pa;
+    size_t b = *(const size_t *)pb;
+    return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+/* Numero di gruppi attesi: una etichetta per (commit puntato, tipo) con almeno
+ * un riferimento nel log. */
+static size_t expected_label_groups(const GitData *data, const History *hist,
+                                    const Layout *lay)
+{
+    size_t cap = (hist ? hist->branch_count : 0) +
+                 (data ? data->ref_count : 0);
+    size_t *keys = xmalloc((cap ? cap : 1) * sizeof(size_t));
+    size_t n = 0;
+    for (size_t i = 0; i < hist->branch_count; i++) {
+        size_t row = lay->nodes[i].row;
+        if (row == NO_IDX || row >= lay->rows)
+            continue;
+        keys[n++] = row * 2 + RENDER_LABEL_BRANCH;
+    }
+    if (data) {
+        for (size_t i = 0; i < data->ref_count; i++) {
+            if (data->refs[i].kind != REF_TAG)
+                continue;
+            size_t ci = gitdata_find_commit(data, data->refs[i].target);
+            if (ci == NO_IDX || ci >= lay->rows)
+                continue;
+            keys[n++] = ci * 2 + RENDER_LABEL_TAG;
+        }
+    }
+    qsort(keys, n, sizeof(size_t), cmp_size);
+    size_t groups = 0;
+    for (size_t i = 0; i < n; i++)
+        if (i == 0 || keys[i] != keys[i - 1])
+            groups++;
+    free(keys);
+    return groups;
+}
+
+/* Rettangolo nominale di una etichetta: una riga di altezza per slot. Con lo
+ * slot crescente due etichette dello stesso commit non si sovrappongono. */
+static void label_rect(const RenderAnchor *a, double *x0, double *y0, double *x1,
+                       double *y1)
+{
+    *x0 = a->p.x;
+    *y0 = a->p.y + (double)a->slot;
+    *x1 = a->p.x + 1.0;
+    *y1 = *y0 + 1.0;
+}
+
+static bool rects_overlap(const RenderAnchor *a, const RenderAnchor *b)
+{
+    double ax0, ay0, ax1, ay1, bx0, by0, bx1, by1;
+    label_rect(a, &ax0, &ay0, &ax1, &ay1);
+    label_rect(b, &bx0, &by0, &bx1, &by1);
+    return ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1;
+}
+
 /* ---- controlli comuni su una scena --------------------------------------- */
 
 /* Numero atteso di archi pieni: un arco per ogni arco tra commit con entrambe
@@ -418,17 +496,59 @@ static void check_scene(const char *repo, const char *tag)
     check_line_shape(&sc, &lay, tag);
     check_paths(&sc, &lay, tag, true);
 
-    /* ancore: una per branch, alla posizione del suo nodo */
-    CHECK(sc.anchor_count == hist.branch_count, "%s: ancore == branch (%zu vs %zu)",
-          tag, sc.anchor_count, hist.branch_count);
-    for (size_t i = 0; i < sc.anchor_count && i < hist.branch_count; i++) {
+    /* etichette: un gruppo per (commit puntato, tipo), alla corsia del commit */
+    CHECK(sc.anchor_count == expected_label_groups(&data, &hist, &lay),
+          "%s: etichette: attese %zu, ottenute %zu", tag,
+          expected_label_groups(&data, &hist, &lay), sc.anchor_count);
+    for (size_t i = 0; i < sc.anchor_count; i++) {
         const RenderAnchor *a = &sc.anchors[i];
-        const LayoutNode *nd = &lay.nodes[i];
-        if (a->branch != i || a->row != nd->row || a->p.x != (double)nd->lane ||
-            a->is_head != hist.branches[i].is_head ||
-            a->is_remote != hist.branches[i].is_remote) {
-            CHECK(false, "%s: ancora %zu non coerente col nodo", tag, i);
+        if (!a->text || !a->text[0] || a->row == NO_IDX || a->row >= lay.rows ||
+            a->commit != a->row || a->p.x != (double)lay.commits[a->row].lane ||
+            a->p.y != (double)a->row ||
+            (a->kind != RENDER_LABEL_BRANCH && a->kind != RENDER_LABEL_TAG)) {
+            CHECK(false, "%s: etichetta %zu non coerente col commit puntato", tag,
+                  i);
             break;
+        }
+        /* nessuna sovrapposizione fra etichette dello stesso commit */
+        bool overlap = false;
+        for (size_t j = i + 1; j < sc.anchor_count && !overlap; j++)
+            if (sc.anchors[j].commit == a->commit &&
+                rects_overlap(a, &sc.anchors[j]))
+                overlap = true;
+        if (overlap) {
+            CHECK(false, "%s: etichette %zu sovrapposte sullo stesso commit",
+                  tag, i);
+            break;
+        }
+    }
+    /* copertura: ogni branch e ogni tag con punta nel log compare in
+     * un'etichetta del tipo giusto */
+    for (size_t i = 0; i < hist.branch_count; i++) {
+        size_t row = lay.nodes[i].row;
+        if (row == NO_IDX || row >= lay.rows)
+            continue;
+        bool found = false;
+        for (size_t j = 0; j < sc.anchor_count && !found; j++)
+            found = sc.anchors[j].kind == RENDER_LABEL_BRANCH &&
+                    sc.anchors[j].commit == row &&
+                    text_has_token(sc.anchors[j].text, hist.branches[i].name);
+        CHECK(found, "%s: branch '%s' senza etichetta", tag,
+              hist.branches[i].name);
+    }
+    if (data.ref_count) {
+        for (size_t i = 0; i < data.ref_count; i++) {
+            if (data.refs[i].kind != REF_TAG)
+                continue;
+            size_t ci = gitdata_find_commit(&data, data.refs[i].target);
+            if (ci == NO_IDX || ci >= lay.rows)
+                continue;
+            bool found = false;
+            for (size_t j = 0; j < sc.anchor_count && !found; j++)
+                found = sc.anchors[j].kind == RENDER_LABEL_TAG &&
+                        sc.anchors[j].commit == ci &&
+                        text_has_token(sc.anchors[j].text, data.refs[i].name);
+            CHECK(found, "%s: tag '%s' senza etichetta", tag, data.refs[i].name);
         }
     }
 
@@ -444,14 +564,68 @@ static void check_scene(const char *repo, const char *tag)
     if (sc.line_count == sc2.line_count && sc.line_count > 0)
         CHECK(memcmp(sc.lines, sc2.lines, sc.line_count * sizeof(RenderLine)) == 0,
               "%s: archi identici fra due costruzioni", tag);
-    if (sc.anchor_count == sc2.anchor_count && sc.anchor_count > 0)
-        CHECK(memcmp(sc.anchors, sc2.anchors,
-                     sc.anchor_count * sizeof(RenderAnchor)) == 0,
-              "%s: ancore identiche fra due costruzioni", tag);
+    for (size_t i = 0; i < sc.anchor_count && i < sc2.anchor_count; i++) {
+        const RenderAnchor *a = &sc.anchors[i];
+        const RenderAnchor *b = &sc2.anchors[i];
+        if (a->row != b->row || a->commit != b->commit || a->slot != b->slot ||
+            a->kind != b->kind || a->is_head != b->is_head ||
+            a->has_remote != b->has_remote || a->p.x != b->p.x ||
+            a->p.y != b->p.y || strcmp(a->text, b->text) != 0) {
+            CHECK(false, "%s: etichetta %zu diversa fra due costruzioni", tag, i);
+            break;
+        }
+        if (i + 1 == sc.anchor_count)
+            CHECK(true, "%s: etichette identiche fra due costruzioni", tag);
+    }
     render_free(&sc2);
 
     printf("%s: %zu righe, %zu corsie, %zu archi, %zu etichette\n", tag,
            sc.rows, sc.lane_count, sc.line_count, sc.anchor_count);
+    render_free(&sc);
+    free_all(&data, &cfg, &hist, &lay);
+}
+
+/* ---- verifiche mirate sulle etichette del repository di prova ------------- */
+
+/* Il branch riallineato (fast-forward) punta a un commit di main: la sua
+ * etichetta deve stare nella corsia del commit puntato; il locale e il suo
+ * remoto sulla stessa punta si uniscono in una sola etichetta. */
+static void test_real_labels(const char *repo)
+{
+    GitData data;
+    GraphConfig cfg;
+    History hist;
+    Layout lay;
+    if (!build_layout(repo, &data, &cfg, &hist, &lay))
+        return;
+    Render sc;
+    render_build(&sc, &data, &hist, &lay);
+
+    bool saw_ff = false, ff_ok = false;
+    for (size_t i = 0; i < sc.anchor_count; i++) {
+        const RenderAnchor *a = &sc.anchors[i];
+        if (a->kind != RENDER_LABEL_BRANCH)
+            continue;
+        if (!saw_ff && text_has_token(a->text, "ff")) {
+            saw_ff = true;
+            ff_ok = a->p.x == (double)lay.commits[a->commit].lane;
+        }
+    }
+    CHECK(saw_ff, "ff: nessuna etichetta");
+    CHECK(ff_ok, "ff: etichetta non sulla corsia del commit puntato");
+
+    bool merged = false;
+    for (size_t i = 0; i < sc.anchor_count && !merged; i++)
+        merged = sc.anchors[i].kind == RENDER_LABEL_BRANCH &&
+                 text_has_token(sc.anchors[i].text, "branch1") &&
+                 text_has_token(sc.anchors[i].text, "origin/branch1");
+    CHECK(merged, "branch1 e origin/branch1 non uniti nella stessa etichetta");
+
+    bool has_tag = false;
+    for (size_t i = 0; i < sc.anchor_count && !has_tag; i++)
+        has_tag = sc.anchors[i].kind == RENDER_LABEL_TAG;
+    CHECK(has_tag, "nessuna etichetta di tag nel repository di prova");
+
     render_free(&sc);
     free_all(&data, &cfg, &hist, &lay);
 }
@@ -774,6 +948,7 @@ int main(int argc, char **argv)
 
     if (argc >= 2) {
         check_scene(argv[1], "repo di prova");
+        test_real_labels(argv[1]);
     } else {
         fprintf(stderr, "avviso: nessun repository di prova: uso i soli sintetici\n");
     }

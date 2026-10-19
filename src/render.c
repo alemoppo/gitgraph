@@ -54,6 +54,105 @@ static size_t route_line(RenderPt pts[RENDER_MAX_POINTS], RenderPt a, RenderPt b
     return 3;
 }
 
+/* Voce di etichetta: un riferimento (branch o tag) alla sua punta. */
+typedef struct {
+    size_t commit;
+    RenderLabelKind kind;
+    const char *name;
+    bool is_head;
+    bool is_remote;
+} LabelEntry;
+
+/* ordine totale per il raggruppamento: commit, tipo, nome */
+static int cmp_entry(const void *pa, const void *pb)
+{
+    const LabelEntry *a = pa;
+    const LabelEntry *b = pb;
+    if (a->commit != b->commit)
+        return a->commit < b->commit ? -1 : 1;
+    if (a->kind != b->kind)
+        return a->kind < b->kind ? -1 : 1;
+    return strcmp(a->name, b->name);
+}
+
+/* Costruisce le etichette: una per (commit puntato, tipo). I riferimenti di un
+ * branch con punta fuori dal log non producono etichetta (non c'e' una cella a
+ * cui ancorarli). */
+static void build_labels(Render *out, const GitData *data, const History *hist,
+                         const Layout *lay)
+{
+    size_t cap = (hist ? hist->branch_count : 0) +
+                 (data ? data->ref_count : 0);
+    LabelEntry *ents = xmalloc((cap ? cap : 1) * sizeof(LabelEntry));
+    size_t ne = 0;
+    if (hist) {
+        for (size_t i = 0; i < hist->branch_count; i++) {
+            size_t row = lay->nodes[i].row;
+            if (row == NO_IDX || row >= lay->rows)
+                continue;
+            ents[ne].commit = row;
+            ents[ne].kind = RENDER_LABEL_BRANCH;
+            ents[ne].name = hist->branches[i].name;
+            ents[ne].is_head = hist->branches[i].is_head;
+            ents[ne].is_remote = hist->branches[i].is_remote;
+            ne++;
+        }
+    }
+    if (data) {
+        for (size_t i = 0; i < data->ref_count; i++) {
+            if (data->refs[i].kind != REF_TAG)
+                continue;
+            size_t ci = gitdata_find_commit(data, data->refs[i].target);
+            if (ci == NO_IDX || ci >= lay->rows)
+                continue;
+            ents[ne].commit = ci;
+            ents[ne].kind = RENDER_LABEL_TAG;
+            ents[ne].name = data->refs[i].name;
+            ents[ne].is_head = false;
+            ents[ne].is_remote = false;
+            ne++;
+        }
+    }
+    if (ne == 0) {
+        free(ents);
+        return;
+    }
+    qsort(ents, ne, sizeof(LabelEntry), cmp_entry);
+
+    out->anchors = xcalloc(ne, sizeof(RenderAnchor));
+    size_t gi = 0;
+    for (size_t i = 0; i < ne;) {
+        size_t commit = ents[i].commit;
+        size_t slot = 0;
+        while (i < ne && ents[i].commit == commit) {
+            RenderLabelKind kind = ents[i].kind;
+            bool is_head = false, has_remote = false;
+            StrBuf sb;
+            sb_init(&sb);
+            while (i < ne && ents[i].commit == commit && ents[i].kind == kind) {
+                if (sb.len)
+                    sb_append(&sb, ", ");
+                sb_append(&sb, ents[i].name);
+                is_head = is_head || ents[i].is_head;
+                has_remote = has_remote || ents[i].is_remote;
+                i++;
+            }
+            RenderAnchor *an = &out->anchors[gi++];
+            an->p.x = (double)lay->commits[commit].lane;
+            an->p.y = (double)commit;
+            an->row = commit;
+            an->commit = commit;
+            an->slot = slot++;
+            an->kind = kind;
+            an->text = sb.data; /* il buffer passa alla scena */
+            an->is_head = is_head;
+            an->has_remote = has_remote;
+        }
+    }
+    out->anchor_count = gi;
+    free(ents);
+}
+
 void render_build(Render *out, const GitData *data, const History *hist,
                   const Layout *lay)
 {
@@ -136,28 +235,18 @@ void render_build(Render *out, const GitData *data, const History *hist,
     }
     out->line_count = nl;
 
-    /* ancore delle etichette: una per branch, alla posizione del suo nodo */
-    if (hist && lay->nodes) {
-        out->anchor_count = hist->branch_count;
-        out->anchors =
-            xcalloc(out->anchor_count ? out->anchor_count : 1, sizeof(RenderAnchor));
-        for (size_t i = 0; i < hist->branch_count; i++) {
-            const LayoutNode *nd = &lay->nodes[i];
-            RenderAnchor *an = &out->anchors[i];
-            an->p.x = (double)nd->lane;
-            an->p.y = (nd->row == NO_IDX) ? 0.0 : (double)nd->row;
-            an->row = nd->row;
-            an->branch = i;
-            an->is_head = hist->branches[i].is_head;
-            an->is_remote = hist->branches[i].is_remote;
-        }
-    }
+    /* etichette: un gruppo per (commit puntato, tipo), alla corsia del commit.
+     * I nomi dello stesso gruppo si uniscono; i gruppi dello stesso commit si
+     * impilano con uno slot crescente (branch prima dei tag). */
+    build_labels(out, data, hist, lay);
 }
 
 void render_free(Render *r)
 {
     if (!r)
         return;
+    for (size_t i = 0; i < r->anchor_count; i++)
+        free(r->anchors[i].text);
     free(r->dots);
     free(r->lines);
     free(r->anchors);

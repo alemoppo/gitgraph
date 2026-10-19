@@ -376,11 +376,15 @@ Cosa si vede:
   modello) sono **tratteggiate**, distinte dagli archi certi. Gli archi di
   paternita' a livello di branch non si duplicano: coincidono con la catena dei
   commit.
-- **Etichette dei riferimenti**: una per branch, alla riga e corsia del suo
-  nodo; il branch corrente (HEAD) e' evidenziato. I riferimenti remoti
-  etichetta di un locale (`origin/main`) stanno sulla corsia del locale.
-- **Tag**: non hanno un nodo-branch nel modello (il layout segue i branch),
-  quindi non producono un'etichetta in questa fase.
+- **Etichette dei riferimenti**: una per commit, alla corsia e riga del
+  **commit puntato** (non della famiglia): un branch riallineato
+  (fast-forward) e i suoi alias compaiono sul commit di main dove sono
+  davvero. I riferimenti locali e remoti dello stesso commit si uniscono in una
+  sola etichetta (`branch1, origin/branch1`); gruppi diversi sullo stesso
+  commit si impilano (branch prima dei tag) senza sovrapporsi. Il branch
+  corrente (HEAD) e' evidenziato; i remoti sono attenuati.
+- **Tag**: etichette a se', con un colore diverso dai branch, ancorate alla
+  corsia del commit puntato.
 
 Comandi: frecce per scorrere, PagSu/PagGiu di una schermata, Home/Fine,
 `+`/`-` per lo zoom, `0` per tornare all'inizio, ESC per uscire; rotella del
@@ -474,10 +478,11 @@ Sedici test, nessuno con finestra:
    primo genitore verticale di 2 punti, diramazione e merge di 3 punti con il
    gomito **sulla riga** giusta (verificati anche su un layout costruito a
    mano, con coordinate attese), le diramazioni suggerite tratteggiate
-   (comprese le punte fuori dal log, che non producono arco), un'ancora per
-   branch, il colore di corsia deterministico (palette ciclica di 16), il
-   determinismo (due costruzioni identiche) e un layout vuoto che produce una
-   scena vuota. Sul repository di prova e su tre repository sintetici costruiti
+   (comprese le punte fuori dal log, che non producono arco), le **etichette**
+   (un gruppo per commit puntato, locale+remoto uniti, una etichetta per i tag,
+   impilate senza sovrapporsi), il colore di corsia deterministico (palette
+   ciclica di 16), il determinismo (due costruzioni identiche) e un layout vuoto
+   che produce una scena vuota. Sul repository di prova e su tre repository sintetici costruiti
    dal test (`x`/`y`/`z` cancellati, 30 rami mergiati e cancellati in
    sequenza, un repository pseudo-casuale con seme fisso e rami che si
    sovrappongono) verifica che **nessun punto stia dentro un tratto
