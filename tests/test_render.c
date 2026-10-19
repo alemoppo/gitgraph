@@ -224,8 +224,78 @@ static void test_hand_built(void)
         CHECK(l2->n == 3 && pt_eq(l2->pts[0], 1, 2) && pt_eq(l2->pts[1], 0, 2) &&
                   pt_eq(l2->pts[2], 0, 0),
               "arco 2: (1,2) -> (0,2) -> (0,0)");
+        CHECK(l0->from == 0 && l0->to == 1 && l1->from == 1 && l1->to == 2 &&
+                  l2->from == 2 && l2->to == 0,
+              "archi: estremi (indici dei commit)");
+    }
+    CHECK(sc.dots[0].merge_target, "merge: anello sulla destinazione");
+    CHECK(!sc.dots[1].merge_target && !sc.dots[2].merge_target,
+          "merge: anello solo sulla destinazione");
+
+    render_free(&sc);
+}
+
+/* Caso di controllo del merge: il branch b continua dopo il merge (Q1, Q2
+ * sopra M). Il layout atteso, per riga: Q2, Q1, M (merge), M1, P2, P1, A.
+ * L'arco di merge scende nella corsia di b da M fino a P2 e la destinazione
+ * (P2) e' marcata; la punta del branch non lo e'. */
+static void test_merge_continuation(void)
+{
+    Layout lay;
+    memset(&lay, 0, sizeof lay);
+
+    LayoutCommit commits[7];
+    memset(commits, 0, sizeof commits);
+    /* riga, corsia, proprietario: main = 0 (A, M1, M), b = 1 */
+    size_t rows[7] = {0, 1, 2, 3, 4, 5, 6};
+    size_t lanes[7] = {1, 1, 0, 0, 1, 1, 0};
+    size_t owners[7] = {1, 1, 0, 0, 1, 1, 0};
+    for (size_t i = 0; i < 7; i++) {
+        commits[i].commit = i;
+        commits[i].row = rows[i];
+        commits[i].lane = lanes[i];
+        commits[i].owner = owners[i];
     }
 
+    LayoutCommitEdge ce[7];
+    memset(ce, 0, sizeof ce);
+    size_t from[7] = {0, 1, 2, 2, 3, 4, 5};
+    size_t to[7] = {1, 2, 3, 4, 6, 5, 6};
+    LayoutCommitEdgeKind kind[7] = {
+        LAYOUT_CEDGE_FIRST_PARENT, LAYOUT_CEDGE_FIRST_PARENT,
+        LAYOUT_CEDGE_FIRST_PARENT, LAYOUT_CEDGE_MERGE_PARENT,
+        LAYOUT_CEDGE_FIRST_PARENT, LAYOUT_CEDGE_FIRST_PARENT,
+        LAYOUT_CEDGE_BRANCH,
+    };
+    for (size_t i = 0; i < 7; i++) {
+        ce[i].from = from[i];
+        ce[i].to = to[i];
+        ce[i].kind = kind[i];
+    }
+
+    lay.commits = commits;
+    lay.commit_count = 7;
+    lay.cedges = ce;
+    lay.cedge_count = 7;
+    lay.lanes = 2;
+    lay.rows = 7;
+
+    Render sc;
+    render_build(&sc, NULL, NULL, &lay);
+    CHECK(sc.dot_count == 7 && sc.line_count == 7,
+          "merge che prosegue: %zu punti, %zu archi (attesi 7, 7)", sc.dot_count,
+          sc.line_count);
+    if (sc.dot_count == 7 && sc.line_count == 7) {
+        CHECK(sc.dots[4].merge_target, "merge che prosegue: anello su P2");
+        CHECK(!sc.dots[2].merge_target && !sc.dots[0].merge_target,
+              "merge che prosegue: niente anello su M e su Q2");
+        const RenderLine *m = &sc.lines[3];
+        CHECK(m->kind == RENDER_LINE_MERGE_PARENT && m->from == 2 && m->to == 4,
+              "merge che prosegue: arco M -> P2");
+        CHECK(m->n == 3 && pt_eq(m->pts[0], 0, 2) && pt_eq(m->pts[1], 1, 2) &&
+                  pt_eq(m->pts[2], 1, 4),
+              "merge che prosegue: orizzontale a riga 2, poi verticale fino a P2");
+    }
     render_free(&sc);
 }
 
@@ -971,6 +1041,7 @@ static void run_synthetic_repos(void)
 int main(int argc, char **argv)
 {
     test_hand_built();
+    test_merge_continuation();
     test_empty();
     test_palette();
 

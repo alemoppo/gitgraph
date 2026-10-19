@@ -179,6 +179,7 @@ void render_build(Render *out, const GitData *data, const History *hist,
         d->commit = ci;
         d->head = (ci == head_ci);
         d->anon = (cell->owner == NO_IDX);
+        d->merge_target = false;
     }
 
     /* archi: uno per ogni arco tra commit. La diramazione di un ramo con padre
@@ -194,6 +195,8 @@ void render_build(Render *out, const GitData *data, const History *hist,
         RenderLine *ln = &out->lines[nl];
         RenderPt a = { (double)lay->commits[ce->from].lane, (double)ce->from };
         RenderPt b = { (double)lay->commits[ce->to].lane, (double)ce->to };
+        ln->from = ce->from;
+        ln->to = ce->to;
         switch (ce->kind) {
         case LAYOUT_CEDGE_FIRST_PARENT:
             ln->kind = RENDER_LINE_FIRST_PARENT;
@@ -208,6 +211,8 @@ void render_build(Render *out, const GitData *data, const History *hist,
         ln->n = route_line(ln->pts, a, b, ln->kind);
         ln->lane = lay->commits[ce->from].lane;
         ln->dashed = false;
+        if (ln->kind == RENDER_LINE_MERGE_PARENT)
+            out->dots[ce->to].merge_target = true;
         if (ln->kind == RENDER_LINE_BRANCH && hist) {
             size_t owner = lay->commits[ce->from].owner;
             if (owner != NO_IDX && owner < hist->branch_count &&

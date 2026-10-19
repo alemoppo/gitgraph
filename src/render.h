@@ -22,6 +22,9 @@
  *  - genitore di merge: orizzontale alla riga del commit di merge fino alla
  *    corsia del genitore, poi verticale in quella corsia fino al genitore
  *    (3 punti);
+ *  - gli archi di merge si disegnano piu' sottili e piu' trasparenti delle
+ *    catene e il commit di destinazione porta un piccolo anello: cosi' un
+ *    branch che continua dopo il merge non sembra puntare alla punta;
  *  - tratteggio: non si disegnano archi a livello di branch. Quando il padre di
  *    un ramo e' ambiguo, il suo arco di diramazione (dal commit proprietario
  *    piu' vecchio al primo genitore) si disegna tratteggiato, come ipotesi da
@@ -68,6 +71,8 @@ typedef struct {
     RenderPt pts[RENDER_MAX_POINTS];
     size_t n;      /* punti usati (2 o 3) */
     size_t lane;   /* corsia del figlio: decide il colore */
+    size_t from;   /* commit di partenza (il figlio) */
+    size_t to;     /* commit di arrivo (il genitore) */
     bool dashed;   /* true per la diramazione di un padre ambiguo */
     RenderLineKind kind;
 } RenderLine;
@@ -76,9 +81,10 @@ typedef struct {
     RenderPt p;
     size_t lane;
     size_t row;
-    size_t commit; /* indice del commit (== row) */
+    size_t commit; /* indice del commit (== row senza filtro) */
     bool head;     /* commit puntato da HEAD */
     bool anon;     /* nessun branch lo reclama */
+    bool merge_target; /* destinazione di un arco di merge: anello */
 } RenderDot;
 
 typedef enum {

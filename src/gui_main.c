@@ -197,6 +197,7 @@ static void draw_frame(SDL_Renderer *ren, TTF_Font *font, const View *v,
 {
     SDL_SetRenderDrawColor(ren, 18, 20, 26, 255);
     SDL_RenderClear(ren);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
 
     double vis_rows = (v->height + 2 * MARGIN_Y) / (ROW_H * v->zoom);
     double vis_cols = (v->width + 2 * MARGIN_X) / (LANE_W * v->zoom);
@@ -222,8 +223,18 @@ static void draw_frame(SDL_Renderer *ren, TTF_Font *font, const View *v,
             continue;
         uint8_t rgb[3];
         render_lane_color(ln->lane, rgb);
-        SDL_SetRenderDrawColor(ren, rgb[0], rgb[1], rgb[2], 205);
-        stroke_path(ren, v, ln, ln->dashed ? 2.0f : 3.0f * (float)v->zoom);
+        Uint8 alpha = 205;
+        float w = 3.0f * (float)v->zoom;
+        if (ln->kind == RENDER_LINE_MERGE_PARENT) {
+            /* il merge non e' una catena: piu' sottile e piu' trasparente,
+             * cosi' non sembra puntare alla punta del branch */
+            alpha = 140;
+            w = 1.6f * (float)v->zoom;
+        } else if (ln->dashed) {
+            w = 2.0f;
+        }
+        SDL_SetRenderDrawColor(ren, rgb[0], rgb[1], rgb[2], alpha);
+        stroke_path(ren, v, ln, w);
     }
 
     /* punti dei commit (in ordine di riga: si puo' interrompere presto) */
@@ -240,6 +251,12 @@ static void draw_frame(SDL_Renderer *ren, TTF_Font *font, const View *v,
         if (d->head) {
             SDL_SetRenderDrawColor(ren, 245, 246, 250, 255);
             fill_circle(ren, cx, cy, r + 3.0f * (float)v->zoom);
+        }
+        if (d->merge_target) {
+            /* anello della destinazione di un merge: dice dove arriva davvero
+             * l'arco anche se il branch prosegue oltre */
+            SDL_SetRenderDrawColor(ren, 188, 196, 214, 220);
+            fill_circle(ren, cx, cy, r + 2.2f * (float)v->zoom);
         }
         if (d->anon) {
             SDL_SetRenderDrawColor(ren, (Uint8)(rgb[0] / 2 + 60),
