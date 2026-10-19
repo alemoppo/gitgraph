@@ -20,7 +20,9 @@
  *    commit; il commit di HEAD e' marcato; i commit anonimi sono marcati;
  *  - un arco per ogni arco tra commit, con gli estremi sulle celle dei commit;
  *    il primo genitore e' un segmento verticale di 2 punti; diramazione e
- *    merge sono spezzate di 3 punti con il gomito sulla riga giusta;
+ *    merge sono spezzate di 3 punti con il gomito sulla riga giusta; la
+ *    diramazione di un ramo con padre ambiguo e' tratteggiata, le altre no
+ *    (nessun arco a livello di branch: la paternita' e' la catena dei commit);
  *  - un'ancora per branch, alla posizione del suo nodo;
  *  - colore di corsia deterministico (palette ciclica di 16);
  *  - due costruzioni successive identiche (memcmp);
@@ -89,17 +91,11 @@ static size_t commit_owner(const Layout *lay, size_t ci)
     return (ci < lay->commit_count) ? lay->commits[ci].owner : NO_IDX;
 }
 
-/* Le due proprieta' del percorso. `only_solid` limita il controllo agli archi
- * pieni: gli archi suggeriti a livello di branch (che non sono archi tra commit)
- * si appoggiano alla riga di un nodo-branch, dove puo' stare anche un'etichetta
- * remota con corsia diversa. */
-static void check_paths(const Render *sc, const Layout *lay, const char *tag,
-                        bool only_solid)
+/* Le due proprieta' del percorso. */
+static void check_paths(const Render *sc, const Layout *lay, const char *tag)
 {
     for (size_t i = 0; i < sc->line_count; i++) {
         const RenderLine *ln = &sc->lines[i];
-        if (only_solid && ln->dashed)
-            continue;
         size_t from = (size_t)ln->pts[0].y;
         size_t to = (size_t)ln->pts[ln->n - 1].y;
         size_t owner_from = commit_owner(lay, from);
@@ -391,7 +387,9 @@ static bool rects_overlap(const RenderAnchor *a, const RenderAnchor *b)
 
 /* Numero atteso di archi pieni: un arco per ogni arco tra commit con entrambe
  * le punte nel log. */
-static size_t expected_solid(const Layout *lay)
+/* Numero atteso di archi: uno per ogni arco tra commit con entrambe le punte
+ * nel log. */
+static size_t expected_edges(const Layout *lay)
 {
     size_t n = 0;
     for (size_t e = 0; e < lay->cedge_count; e++)
@@ -401,28 +399,53 @@ static size_t expected_solid(const Layout *lay)
     return n;
 }
 
-static size_t expected_suggested(const Layout *lay)
+/* Un arco tratteggiato per ogni diramazione di un ramo con padre ambiguo. */
+static size_t expected_dashed(const Layout *lay, const History *hist)
 {
     size_t n = 0;
-    for (size_t e = 0; e < lay->edge_count; e++) {
-        if (lay->edges[e].kind != LAYOUT_EDGE_SUGGESTED)
+    for (size_t e = 0; e < lay->cedge_count; e++) {
+        const LayoutCommitEdge *ce = &lay->cedges[e];
+        if (ce->from >= lay->commit_count || ce->to >= lay->commit_count)
             continue;
-        if (lay->nodes[lay->edges[e].child].row != NO_IDX &&
-            lay->nodes[lay->edges[e].parent].row != NO_IDX)
+        if (ce->kind != LAYOUT_CEDGE_BRANCH)
+            continue;
+        size_t owner = lay->commits[ce->from].owner;
+        if (owner != NO_IDX && owner < hist->branch_count &&
+            hist->branches[owner].state == PARENT_AMBIGUOUS)
             n++;
     }
     return n;
 }
 
+static bool owner_ambiguous(const Layout *lay, const History *hist, size_t from)
+{
+    size_t owner = lay->commits[from].owner;
+    return owner != NO_IDX && owner < hist->branch_count &&
+           hist->branches[owner].state == PARENT_AMBIGUOUS;
+}
+
 /* Forma dell'arco: verticale di 2 punti, oppure 3 punti con il gomito su una
- * riga (diramazione: verticale poi orizzontale; merge/suggerito: orizzontale
- * poi verticale). */
-static void check_line_shape(const Render *sc, const Layout *lay, const char *tag)
+ * riga (diramazione: verticale poi orizzontale; merge: orizzontale poi
+ * verticale). Solo la diramazione di un padre ambiguo e' tratteggiata. */
+static void check_line_shape(const Render *sc, const Layout *lay,
+                             const History *hist, const char *tag)
 {
     for (size_t i = 0; i < sc->line_count; i++) {
         const RenderLine *ln = &sc->lines[i];
         if (ln->n != 2 && ln->n != 3) {
             CHECK(false, "%s: arco %zu con %zu punti", tag, i, ln->n);
+            return;
+        }
+        if (ln->dashed &&
+            (ln->kind != RENDER_LINE_BRANCH ||
+             !owner_ambiguous(lay, hist, (size_t)ln->pts[0].y))) {
+            CHECK(false, "%s: arco %zu tratteggiato senza padre ambiguo", tag, i);
+            return;
+        }
+        if (!ln->dashed && ln->kind == RENDER_LINE_BRANCH &&
+            owner_ambiguous(lay, hist, (size_t)ln->pts[0].y)) {
+            CHECK(false, "%s: diramazione %zu ambigua ma non tratteggiata", tag,
+                  i);
             return;
         }
         if (ln->pts[0].x != (double)(size_t)ln->pts[0].x ||
@@ -488,13 +511,18 @@ static void check_scene(const char *repo, const char *tag)
         }
     }
 
-    size_t solid = expected_solid(&lay);
-    size_t sugg = expected_suggested(&lay);
-    CHECK(sc.line_count == solid + sugg,
-          "%s: archi: attesi %zu, ottenuti %zu", tag, solid + sugg,
-          sc.line_count);
-    check_line_shape(&sc, &lay, tag);
-    check_paths(&sc, &lay, tag, true);
+    size_t edges = expected_edges(&lay);
+    CHECK(sc.line_count == edges, "%s: archi: attesi %zu, ottenuti %zu", tag,
+          edges, sc.line_count);
+    check_line_shape(&sc, &lay, &hist, tag);
+    check_paths(&sc, &lay, tag);
+    size_t dashed = 0;
+    for (size_t i = 0; i < sc.line_count; i++)
+        if (sc.lines[i].dashed)
+            dashed++;
+    CHECK(dashed == expected_dashed(&lay, &hist),
+          "%s: diramazioni tratteggiate: attese %zu, ottenute %zu", tag,
+          expected_dashed(&lay, &hist), dashed);
 
     /* etichette: un gruppo per (commit puntato, tipo), alla corsia del commit */
     CHECK(sc.anchor_count == expected_label_groups(&data, &hist, &lay),

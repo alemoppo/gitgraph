@@ -181,15 +181,9 @@ void render_build(Render *out, const GitData *data, const History *hist,
         d->anon = (cell->owner == NO_IDX);
     }
 
-    /* archi: tutti gli archi tra commit piu' le diramazioni suggerite (a
-     * livello di branch). Il vettore e' dimensionato sul caso peggiore, poi la
-     * lunghezza effettiva tiene conto degli archi suggeriti scartati (una punta
-     * fuori dal log non ha posizione). */
-    size_t suggested = 0;
-    for (size_t e = 0; e < lay->edge_count; e++)
-        if (lay->edges[e].kind == LAYOUT_EDGE_SUGGESTED)
-            suggested++;
-    size_t cap = lay->cedge_count + suggested;
+    /* archi: uno per ogni arco tra commit. La diramazione di un ramo con padre
+     * ambiguo si disegna tratteggiata (e' l'ipotesi del layout). */
+    size_t cap = lay->cedge_count;
     out->lines = xcalloc(cap ? cap : 1, sizeof(RenderLine));
     size_t nl = 0;
 
@@ -214,23 +208,12 @@ void render_build(Render *out, const GitData *data, const History *hist,
         ln->n = route_line(ln->pts, a, b, ln->kind);
         ln->lane = lay->commits[ce->from].lane;
         ln->dashed = false;
-        nl++;
-    }
-
-    for (size_t e = 0; e < lay->edge_count; e++) {
-        if (lay->edges[e].kind != LAYOUT_EDGE_SUGGESTED)
-            continue;
-        const LayoutNode *cn = &lay->nodes[lay->edges[e].child];
-        const LayoutNode *pn = &lay->nodes[lay->edges[e].parent];
-        if (cn->row == NO_IDX || pn->row == NO_IDX)
-            continue;
-        RenderLine *ln = &out->lines[nl];
-        RenderPt a = { (double)cn->lane, (double)cn->row };
-        RenderPt b = { (double)pn->lane, (double)pn->row };
-        ln->kind = RENDER_LINE_SUGGESTED;
-        ln->n = route_line(ln->pts, a, b, ln->kind);
-        ln->lane = cn->lane;
-        ln->dashed = true;
+        if (ln->kind == RENDER_LINE_BRANCH && hist) {
+            size_t owner = lay->commits[ce->from].owner;
+            if (owner != NO_IDX && owner < hist->branch_count &&
+                hist->branches[owner].state == PARENT_AMBIGUOUS)
+                ln->dashed = true;
+        }
         nl++;
     }
     out->line_count = nl;

@@ -17,9 +17,10 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
   archi tra commit), etichette dei riferimenti remoti sulla corsia del locale,
   catene anonime con corsie riusabili; `gitgraph_dump --layout`.
 - **Fase 5 (completata)**: disegno con SDL3/SDL3_ttf (`gitgraph`): geometria
-  della scena senza SDL (`src/render.c`), finestra con corsie colorate, archi,
-  etichette dei riferimenti, marcatura di HEAD, archi suggeriti tratteggiati,
-  scorrimento e zoom; disegno verificabile senza finestra (driver `dummy`).
+  della scena senza SDL (`src/render.c`), finestra con corsie colorate, archi a
+  gomito sulla riga, etichette dei riferimenti unite e impilate (con i tag),
+  marcatura di HEAD, diramazioni ambigue tratteggiate, scorrimento e zoom;
+  disegno verificabile senza finestra (driver `dummy`).
 - Fasi successive: interazione avanzata (dettaglio del commit, ricerca).
 
 ## Struttura
@@ -372,10 +373,11 @@ Cosa si vede:
   genitore, poi verticale in quella corsia fino al genitore. Le due proprieta'
   (nessun punto dentro un tratto orizzontale, nessun punto di un'altra catena
   dentro un tratto verticale) sono verificate dal test `render`.
-- **Archi suggeriti**: le diramazioni ambigue (padre suggerito, vedi il
-  modello) sono **tratteggiate**, distinte dagli archi certi. Gli archi di
-  paternita' a livello di branch non si duplicano: coincidono con la catena dei
-  commit.
+- **Diramazioni ambigue**: non si disegnano archi a livello di branch. Quando il
+  padre e' ambiguo (padre suggerito, vedi il modello), l'arco di diramazione
+  dal commit proprietario piu' vecchio al primo genitore si disegna
+  **tratteggiato**, come ipotesi da confermare con `[parents]`; la paternita'
+  coincide con la catena dei commit e non si duplica.
 - **Etichette dei riferimenti**: una per commit, alla corsia e riga del
   **commit puntato** (non della famiglia): un branch riallineato
   (fast-forward) e i suoi alias compaiono sul commit di main dove sono
@@ -477,8 +479,8 @@ Sedici test, nessuno con finestra:
    marcati), un arco per ogni arco tra commit con gli estremi sulle celle, il
    primo genitore verticale di 2 punti, diramazione e merge di 3 punti con il
    gomito **sulla riga** giusta (verificati anche su un layout costruito a
-   mano, con coordinate attese), le diramazioni suggerite tratteggiate
-   (comprese le punte fuori dal log, che non producono arco), le **etichette**
+   mano, con coordinate attese), le diramazioni ambigue tratteggiate (e solo
+   quelle, col conteggio atteso), le **etichette**
    (un gruppo per commit puntato, locale+remoto uniti, una etichetta per i tag,
    impilate senza sovrapporsi), il colore di corsia deterministico (palette
    ciclica di 16), il determinismo (due costruzioni identiche) e un layout vuoto

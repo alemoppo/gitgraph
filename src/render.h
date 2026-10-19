@@ -22,9 +22,11 @@
  *  - genitore di merge: orizzontale alla riga del commit di merge fino alla
  *    corsia del genitore, poi verticale in quella corsia fino al genitore
  *    (3 punti);
- *  - estero: l'arco suggerito (tratteggiato) fra due punte di branch, finche'
- *    il caso e' ambiguo. E' l'unico arco a livello di branch: gli archi di
- *    paternita' coincidono con la catena dei commit e non si duplicano.
+ *  - tratteggio: non si disegnano archi a livello di branch. Quando il padre di
+ *    un ramo e' ambiguo, il suo arco di diramazione (dal commit proprietario
+ *    piu' vecchio al primo genitore) si disegna tratteggiato, come ipotesi da
+ *    confermare con [parents]; la paternita' coincide con la catena dei commit
+ *    e non si duplica.
  *
  * ETICHETTE. Le etichette sono raggruppate per commit: ogni gruppo ha come
  * ancora la corsia e la riga del commit puntato (LayoutCommit.lane), non la
@@ -57,8 +59,7 @@ typedef struct {
 typedef enum {
     RENDER_LINE_FIRST_PARENT, /* catena: primo genitore nella stessa corsia */
     RENDER_LINE_MERGE_PARENT, /* secondo genitore (o successivo) di un merge */
-    RENDER_LINE_BRANCH,       /* diramazione: primo genitore in altra corsia */
-    RENDER_LINE_SUGGESTED     /* arco suggerito a livello di branch (tratteggio) */
+    RENDER_LINE_BRANCH        /* diramazione: primo genitore in altra corsia */
 } RenderLineKind;
 
 #define RENDER_MAX_POINTS 3
@@ -67,7 +68,7 @@ typedef struct {
     RenderPt pts[RENDER_MAX_POINTS];
     size_t n;      /* punti usati (2 o 3) */
     size_t lane;   /* corsia del figlio: decide il colore */
-    bool dashed;   /* true per gli archi suggeriti */
+    bool dashed;   /* true per la diramazione di un padre ambiguo */
     RenderLineKind kind;
 } RenderLine;
 
