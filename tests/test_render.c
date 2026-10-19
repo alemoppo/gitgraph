@@ -232,6 +232,16 @@ static void test_hand_built(void)
     CHECK(!sc.dots[1].merge_target && !sc.dots[2].merge_target,
           "merge: anello solo sulla destinazione");
 
+    /* ricerca sotto il puntatore (funzioni pure della selezione) */
+    CHECK(render_commit_at(&sc, 0.0, 0.0, 0.5, 0.5) == 0,
+          "commit_at: il punto (0,0) e' il commit 0");
+    CHECK(render_commit_at(&sc, 1.0, 2.0, 0.3, 0.3) == 2,
+          "commit_at: il punto (1,2) e' il commit 2");
+    CHECK(render_commit_at(&sc, 0.6, 0.6, 0.4, 0.4) == NO_IDX,
+          "commit_at: fuori raggio nessun commit");
+    CHECK(render_commit_at(&sc, 0.0, 0.0, 0.0, 0.5) == NO_IDX,
+          "commit_at: raggio nullo nessun commit");
+
     render_free(&sc);
 }
 
@@ -724,8 +734,104 @@ static void test_real_labels(const char *repo)
         has_tag = sc.anchors[i].kind == RENDER_LABEL_TAG;
     CHECK(has_tag, "nessuna etichetta di tag nel repository di prova");
 
+    /* ricerca sotto il puntatore: il centro del rettangolo nominale di una
+     * etichetta di branch la ritrova; un punto a sinistra dell'ancora no */
+    size_t bi = NO_IDX;
+    for (size_t i = 0; i < sc.anchor_count && bi == NO_IDX; i++) {
+        const RenderAnchor *a = &sc.anchors[i];
+        if (a->kind == RENDER_LABEL_BRANCH && a->branch != NO_IDX &&
+            text_has_token(a->text, "branch1"))
+            bi = i;
+    }
+    CHECK(bi != NO_IDX, "label_at: etichetta di branch1 assente");
+    if (bi != NO_IDX) {
+        const RenderAnchor *a = &sc.anchors[bi];
+        double cx = a->p.x + RENDER_LABEL_DX + a->w / 2.0;
+        double cy = a->p.y + (double)a->slot;
+        CHECK(render_label_at(&sc, cx, cy) == bi,
+              "label_at: il centro dell'etichetta la ritrova");
+        CHECK(render_label_at(&sc, a->p.x - 1.0, cy) == NO_IDX,
+              "label_at: fuori dall'etichetta nessun gruppo");
+        CHECK(a->branch == history_find_branch(&hist, "branch1"),
+              "label_at: branch rappresentante del gruppo");
+    }
+
+    /* dettagli di un commit di merge: hash completo, genitori con "merge",
+     * riferimenti, ramo proprietario, stato e motivazione */
+    size_t merge_ci = NO_IDX;
+    for (size_t ci = 0; ci < data.commit_count && merge_ci == NO_IDX; ci++)
+        if (data.commits[ci].parent_count > 1)
+            merge_ci = ci;
+    CHECK(merge_ci != NO_IDX, "dettagli: nessun merge nel repo di prova");
+    if (merge_ci != NO_IDX) {
+        char *t = render_details_text(&data, &hist, &lay, merge_ci, NO_IDX, 48);
+        CHECK(t && strstr(t, data.commits[merge_ci].hash),
+              "dettagli: hash completo assente");
+        CHECK(t && strstr(t, "(merge)"), "dettagli: genitori senza (merge)");
+        CHECK(t && strstr(t, "autore: ") && strstr(t, "data:   "),
+              "dettagli: autore o data assenti");
+        CHECK(t && strstr(t, "riferimenti:"), "dettagli: riferimenti assenti");
+        CHECK(t && strstr(t, "ramo: ") && strstr(t, "stato: ") &&
+                  strstr(t, "motivo: "),
+              "dettagli: ramo, stato o motivazione assenti");
+        free(t);
+    }
+
+    /* selezione di un branch ambiguo: intestazione e padre suggerito */
+    size_t b1 = history_find_branch(&hist, "branch1");
+    CHECK(b1 != NO_IDX, "dettagli: branch1 assente");
+    if (b1 != NO_IDX && hist.branches[b1].tip_pos < data.commit_count) {
+        char *t = render_details_text(&data, &hist, &lay,
+                                      hist.branches[b1].tip_pos, b1, 48);
+        CHECK(t && strstr(t, "selezione: branch branch1"),
+              "dettagli: intestazione del branch selezionato assente");
+        if (hist.branches[b1].state == PARENT_AMBIGUOUS &&
+            hist.branches[b1].suggested_parent)
+            CHECK(t && strstr(t, "padre suggerito:"),
+                  "dettagli: padre suggerito assente");
+        free(t);
+    }
+
     render_free(&sc);
     free_all(&data, &cfg, &hist, &lay);
+}
+
+/* Il messaggio nel pannello va a capo e si ferma a 12 righe; un commit fuori
+ * intervallo non produce testo. */
+static void test_details_wrap(void)
+{
+    static const char msg[] =
+        "m01\nm02\nm03\nm04\nm05\nm06\nm07\nm08\nm09\nm10\n"
+        "m11\nm12\nm13\nm14\nm15\nm16\nm17\nm18\nm19\nm20";
+    GitCommit c;
+    memset(&c, 0, sizeof c);
+    c.hash = "0123456789012345678901234567890123456789";
+    c.author = "Autore";
+    c.message = (char *)msg;
+    GitData d;
+    memset(&d, 0, sizeof d);
+    d.commits = &c;
+    d.commit_count = 1;
+    History h;
+    memset(&h, 0, sizeof h);
+    LayoutCommit lc;
+    memset(&lc, 0, sizeof lc);
+    lc.owner = NO_IDX;
+    Layout lay;
+    memset(&lay, 0, sizeof lay);
+    lay.commits = &lc;
+    lay.commit_count = 1;
+    lay.rows = 1;
+    lay.lanes = 1;
+
+    char *t = render_details_text(&d, &h, &lay, 0, NO_IDX, 40);
+    CHECK(t && strstr(t, c.hash), "dettagli: hash completo");
+    CHECK(t && strstr(t, "m01") && strstr(t, "m12"),
+          "dettagli: messaggio troncato troppo presto");
+    CHECK(t && !strstr(t, "m13"), "dettagli: messaggio oltre 12 righe");
+    free(t);
+    CHECK(render_details_text(&d, &h, &lay, 5, NO_IDX, 40) == NULL,
+          "dettagli: commit fuori intervallo senza testo");
 }
 
 /* ---- repository sintetici ------------------------------------------------- */
@@ -1051,6 +1157,7 @@ int main(int argc, char **argv)
     } else {
         fprintf(stderr, "avviso: nessun repository di prova: uso i soli sintetici\n");
     }
+    test_details_wrap();
 
     run_synthetic_repos();
     if (g_rc != 0)

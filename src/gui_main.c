@@ -1,4 +1,4 @@
-/* gui_main.c - finestra SDL3/SDL3_ttf sulla scena (fase 5).
+/* gui_main.c - finestra SDL3/SDL3_ttf sulla scena (fase 5/6).
  *
  * Uso: gitgraph [opzioni] [percorso-repo]
  *   --font PERCORSO   font TrueType (default: un font di sistema)
@@ -10,13 +10,15 @@
  *   --help            questo aiuto
  *
  * Il disegno vero e proprio e' qui; la geometria della scena (corsie, righe,
- * archi, ancore delle etichette) e' in render.c, senza SDL. Questa fase non
- * scrive sul repository: legge e disegna.
+ * archi, ancore delle etichette) e la ricerca sotto il puntatore sono in
+ * render.c, senza SDL. Questa fase non scrive sul repository: legge e disegna.
  *
- * Comandi: frecce per scorrere, PagSu/PagGiu di una schermata, Home/Fine,
- * "+"/"-" per lo zoom, "0" per tornare all'inizio, ESC per uscire; rotella del
- * mouse per scorrere, Ctrl+rotella per lo zoom, trascinamento col sinistro per
- * spostare la vista.
+ * Comandi: click sinistro su un commit o su un'etichetta per selezionare,
+ * click nel vuoto per deselezionare, C per copiare l'hash completo, Tab per
+ * il pannello dei dettagli, Esc per deselezionare (poi uscire); frecce per
+ * scorrere, PagSu/PagGiu di una schermata, Home/Fine, "+"/"-" per lo zoom, "0"
+ * per tornare all'inizio; rotella del mouse per scorrere, Ctrl+rotella per lo
+ * zoom, trascinamento col tasto sinistro per spostare la vista.
  */
 #include "config.h"
 #include "gitdata.h"
@@ -40,8 +42,14 @@
 #define MARGIN_Y 28.0f
 #define DOT_R 5.0f
 #define LABEL_PT 13.0f
+#define PANEL_PT 12.0f
+#define STATUS_PT 12.0f
+#define PANEL_W 380
+#define STATUS_H 24
 #define ZOOM_MIN 0.35
 #define ZOOM_MAX 4.0
+
+#define NO_IDX ((size_t)-1)
 
 typedef struct {
     const char *repo;
@@ -57,9 +65,28 @@ typedef struct {
     double off_x; /* prima corsia visibile (in unita' di scena) */
     double off_y; /* prima riga visibile */
     double zoom;
-    int width;
+    int width;  /* area del grafo (senza il pannello) */
     int height;
 } View;
+
+typedef struct {
+    GitData data;
+    GraphConfig cfg;
+    History hist;
+    Layout lay;
+    Render sc;
+} Model;
+
+typedef struct {
+    View view;
+    int win_w; /* dimensioni in pixel della finestra */
+    int win_h;
+    bool panel_on;
+    bool sel_active;
+    bool sel_is_branch; /* true: la selezione e' un branch, non un commit */
+    size_t sel_commit; /* commit selezionato (per un branch: la punta) */
+    size_t sel_branch; /* indice del branch selezionato */
+} App;
 
 static const char *const g_font_candidates[] = {
     "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf",
@@ -72,7 +99,10 @@ static void print_help(void)
     printf("uso: gitgraph [--font PERCORSO] [--width N] [--height N]\n"
            "              [--headless] [--screenshot P] [--frames N] [--help]\n"
            "              [percorso-repo]\n"
-           "  percorso-repo  default: directory corrente\n");
+           "  percorso-repo  default: directory corrente\n"
+           "comandi: click sinistro = seleziona, C = copia l'hash, Tab =\n"
+           "         pannello, Esc = deseleziona (poi esce), frecce/rotella =\n"
+           "         scorrimento, Ctrl+rotella = zoom\n");
 }
 
 static float px(const View *v, double x)
@@ -169,12 +199,30 @@ static void stroke_path(SDL_Renderer *ren, const View *v, const RenderLine *ln,
     }
 }
 
+static void draw_text(SDL_Renderer *ren, TTF_Font *font, float x, float y,
+                      const char *text, size_t len, SDL_Color fg)
+{
+    if (!font || len == 0)
+        return;
+    SDL_Surface *s = TTF_RenderText_Blended(font, text, len, fg);
+    if (!s)
+        return;
+    SDL_Texture *t = SDL_CreateTextureFromSurface(ren, s);
+    if (t) {
+        SDL_FRect dst = { x, y, (float)s->w, (float)s->h };
+        SDL_RenderTexture(ren, t, NULL, &dst);
+        SDL_DestroyTexture(t);
+    }
+    SDL_DestroySurface(s);
+}
+
 static void draw_label(SDL_Renderer *ren, TTF_Font *font, float x, float y,
                        SDL_Color fg, Uint8 bg_r, Uint8 bg_g, Uint8 bg_b,
-                       const char *text)
+                       Uint8 alpha, const char *text)
 {
     if (!font)
         return;
+    fg.a = alpha;
     SDL_Surface *s = TTF_RenderText_Blended(font, text, 0, fg);
     if (!s)
         return;
@@ -183,162 +231,14 @@ static void draw_label(SDL_Renderer *ren, TTF_Font *font, float x, float y,
         float pad = 3.0f;
         SDL_FRect bg = { x, y, (float)s->w + 2 * pad, (float)s->h + 2 * pad };
         SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(ren, bg_r, bg_g, bg_b, 215);
+        SDL_SetRenderDrawColor(ren, bg_r, bg_g, bg_b,
+                               (Uint8)((unsigned)alpha * 215 / 255));
         SDL_RenderFillRect(ren, &bg);
         SDL_FRect dst = { x + pad, y + pad, (float)s->w, (float)s->h };
         SDL_RenderTexture(ren, t, NULL, &dst);
         SDL_DestroyTexture(t);
     }
     SDL_DestroySurface(s);
-}
-
-static void draw_frame(SDL_Renderer *ren, TTF_Font *font, const View *v,
-                       const Render *sc)
-{
-    SDL_SetRenderDrawColor(ren, 18, 20, 26, 255);
-    SDL_RenderClear(ren);
-    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-
-    double vis_rows = (v->height + 2 * MARGIN_Y) / (ROW_H * v->zoom);
-    double vis_cols = (v->width + 2 * MARGIN_X) / (LANE_W * v->zoom);
-    double r0 = v->off_y - 1, r1 = v->off_y + vis_rows + 1;
-    double c0 = v->off_x - 1, c1 = v->off_x + vis_cols + 1;
-
-    /* archi: sotto i punti, cosi' i nodi restano leggibili */
-    for (size_t i = 0; i < sc->line_count; i++) {
-        const RenderLine *ln = &sc->lines[i];
-        double lo = ln->pts[0].y, hi = ln->pts[0].y, lox = ln->pts[0].x,
-               hix = ln->pts[0].x;
-        for (size_t k = 1; k < ln->n; k++) {
-            if (ln->pts[k].y < lo)
-                lo = ln->pts[k].y;
-            if (ln->pts[k].y > hi)
-                hi = ln->pts[k].y;
-            if (ln->pts[k].x < lox)
-                lox = ln->pts[k].x;
-            if (ln->pts[k].x > hix)
-                hix = ln->pts[k].x;
-        }
-        if (hi < r0 || lo > r1 || hix < c0 || lox > c1)
-            continue;
-        uint8_t rgb[3];
-        render_lane_color(ln->lane, rgb);
-        Uint8 alpha = 205;
-        float w = 3.0f * (float)v->zoom;
-        if (ln->kind == RENDER_LINE_MERGE_PARENT) {
-            /* il merge non e' una catena: piu' sottile e piu' trasparente,
-             * cosi' non sembra puntare alla punta del branch */
-            alpha = 140;
-            w = 1.6f * (float)v->zoom;
-        } else if (ln->dashed) {
-            w = 2.0f;
-        }
-        SDL_SetRenderDrawColor(ren, rgb[0], rgb[1], rgb[2], alpha);
-        stroke_path(ren, v, ln, w);
-    }
-
-    /* punti dei commit (in ordine di riga: si puo' interrompere presto) */
-    float r = DOT_R * (float)v->zoom;
-    for (size_t i = 0; i < sc->dot_count; i++) {
-        const RenderDot *d = &sc->dots[i];
-        if ((double)d->row < r0)
-            continue;
-        if ((double)d->row > r1)
-            break;
-        uint8_t rgb[3];
-        render_lane_color(d->lane, rgb);
-        float cx = px(v, d->p.x), cy = py(v, d->p.y);
-        if (d->head) {
-            SDL_SetRenderDrawColor(ren, 245, 246, 250, 255);
-            fill_circle(ren, cx, cy, r + 3.0f * (float)v->zoom);
-        }
-        if (d->merge_target) {
-            /* anello della destinazione di un merge: dice dove arriva davvero
-             * l'arco anche se il branch prosegue oltre */
-            SDL_SetRenderDrawColor(ren, 188, 196, 214, 220);
-            fill_circle(ren, cx, cy, r + 2.2f * (float)v->zoom);
-        }
-        if (d->anon) {
-            SDL_SetRenderDrawColor(ren, (Uint8)(rgb[0] / 2 + 60),
-                                   (Uint8)(rgb[1] / 2 + 60),
-                                   (Uint8)(rgb[2] / 2 + 60), 255);
-        } else {
-            SDL_SetRenderDrawColor(ren, rgb[0], rgb[1], rgb[2], 255);
-        }
-        fill_circle(ren, cx, cy, r);
-    }
-
-    /* etichette dei riferimenti: gruppi uniti, impilati con lo slot */
-    if (font && v->zoom >= 0.5) {
-        TTF_SetFontSize(font, LABEL_PT * (float)v->zoom);
-        int fh = TTF_GetFontHeight(font);
-        float slot_h = (float)fh + 4.0f;
-        for (size_t i = 0; i < sc->anchor_count; i++) {
-            const RenderAnchor *a = &sc->anchors[i];
-            if (a->row == (size_t)-1 || (double)a->row < r0 ||
-                (double)a->row > r1)
-                continue;
-            float x = px(v, a->p.x) + 9.0f * (float)v->zoom;
-            float y = py(v, a->p.y) - fh / 2.0f + (float)a->slot * slot_h;
-            SDL_Color fg = { 235, 235, 240, 255 };
-            Uint8 br = 30, bgc = 34, bb = 44;
-            if (a->kind == RENDER_LABEL_TAG) {
-                /* tag: colore diverso dai branch */
-                fg.r = 226;
-                fg.g = 200;
-                fg.b = 120;
-                br = 56;
-                bgc = 46;
-                bb = 18;
-            } else if (a->is_head) {
-                fg.r = 255;
-                fg.g = 230;
-                fg.b = 120;
-                br = 60;
-                bgc = 52;
-                bb = 20;
-            } else if (a->has_remote) {
-                fg.r = fg.g = fg.b = 170;
-            }
-            draw_label(ren, font, x, y, fg, br, bgc, bb, a->text);
-        }
-    }
-}
-
-static void handle_key(const SDL_KeyboardEvent *k, View *v, bool *running,
-                       size_t lanes, size_t rows)
-{
-    if (k->key == SDLK_ESCAPE) {
-        *running = false;
-        return;
-    }
-    if (k->key == SDLK_DOWN)
-        v->off_y += 1;
-    else if (k->key == SDLK_UP)
-        v->off_y -= 1;
-    else if (k->key == SDLK_RIGHT)
-        v->off_x += 1;
-    else if (k->key == SDLK_LEFT)
-        v->off_x -= 1;
-    else if (k->key == SDLK_PAGEDOWN)
-        v->off_y += 10;
-    else if (k->key == SDLK_PAGEUP)
-        v->off_y -= 10;
-    else if (k->key == SDLK_HOME)
-        v->off_y = 0;
-    else if (k->key == SDLK_END)
-        v->off_y = 1e9;
-    else if (k->key == SDLK_PLUS || k->key == SDLK_EQUALS ||
-             k->key == SDLK_KP_PLUS)
-        v->zoom *= 1.1;
-    else if (k->key == SDLK_MINUS || k->key == SDLK_KP_MINUS)
-        v->zoom /= 1.1;
-    else if (k->key == SDLK_0) {
-        v->zoom = 1.0;
-        v->off_x = 0;
-        v->off_y = 0;
-    }
-    view_clamp(v, lanes, rows);
 }
 
 static void load_config(const GitData *data, GraphConfig *cfg)
@@ -375,6 +275,385 @@ static void load_config(const GitData *data, GraphConfig *cfg)
     config_report_free(&report);
     free(branches);
     /* un file rifiutato non e' un errore: resta il solo tronco implicito */
+}
+
+static bool model_load(Model *m, const char *repo, char *err, size_t err_size)
+{
+    memset(m, 0, sizeof *m);
+    if (!gitdata_load(&m->data, repo, err, err_size))
+        return false;
+    load_config(&m->data, &m->cfg);
+    if (!history_build(&m->hist, &m->data, &m->cfg, err, err_size)) {
+        config_free(&m->cfg);
+        gitdata_free(&m->data);
+        memset(m, 0, sizeof *m);
+        return false;
+    }
+    layout_build(&m->lay, &m->hist);
+    render_build(&m->sc, &m->data, &m->hist, &m->lay);
+    return true;
+}
+
+static void model_free(Model *m)
+{
+    render_free(&m->sc);
+    layout_free(&m->lay);
+    history_free(&m->hist);
+    config_free(&m->cfg);
+    gitdata_free(&m->data);
+    memset(m, 0, sizeof *m);
+}
+
+/* Riporta l'area del grafo alla larghezza della finestra (il pannello, se
+ * acceso, toglie PANEL_W) e corregge lo scorrimento. */
+static void app_resize(Model *m, App *app)
+{
+    app->view.width = app->win_w - (app->panel_on ? PANEL_W : 0);
+    if (app->view.width < 100)
+        app->view.width = 100;
+    app->view.height = app->win_h;
+    view_clamp(&app->view, m->sc.lane_count, m->sc.rows);
+}
+
+static void app_clear_selection(App *app)
+{
+    app->sel_active = false;
+    app->sel_is_branch = false;
+    app->sel_commit = NO_IDX;
+    app->sel_branch = NO_IDX;
+}
+
+static void app_select_commit(Model *m, App *app, size_t commit)
+{
+    if (commit >= m->data.commit_count)
+        return;
+    app->sel_active = true;
+    app->sel_is_branch = false;
+    app->sel_commit = commit;
+    app->sel_branch = NO_IDX;
+    app->panel_on = true;
+    app_resize(m, app);
+}
+
+static void app_select_branch(Model *m, App *app, size_t branch)
+{
+    if (branch >= m->hist.branch_count)
+        return;
+    size_t tip = m->hist.branches[branch].tip_pos;
+    if (tip == NO_IDX || tip >= m->data.commit_count)
+        return;
+    app->sel_active = true;
+    app->sel_is_branch = true;
+    app->sel_commit = tip;
+    app->sel_branch = branch;
+    app->panel_on = true;
+    app_resize(m, app);
+}
+
+static void draw_panel(SDL_Renderer *ren, TTF_Font *font, Model *m, App *app)
+{
+    float x = (float)(app->win_w - PANEL_W);
+    float h = (float)(app->win_h - STATUS_H);
+    SDL_SetRenderDrawColor(ren, 24, 26, 34, 255);
+    SDL_FRect bg = { x, 0, (float)PANEL_W, h };
+    SDL_RenderFillRect(ren, &bg);
+    SDL_SetRenderDrawColor(ren, 70, 76, 92, 255);
+    SDL_RenderLine(ren, x, 0, x, h);
+    if (!font)
+        return;
+
+    char *text = NULL;
+    if (app->sel_active && app->sel_commit < m->data.commit_count) {
+        text = render_details_text(&m->data, &m->hist, &m->lay, app->sel_commit,
+                                   app->sel_is_branch ? app->sel_branch : NO_IDX,
+                                   48);
+    }
+    if (!text)
+        text = xstrdup("nessuna selezione\n\n"
+                       "click su un commit o su\n"
+                       "un'etichetta: dettagli e\n"
+                       "selezione\n\n"
+                       "C: copia l'hash completo\n"
+                       "Tab: mostra/nascondi il pannello\n"
+                       "Esc: deseleziona, poi esce\n");
+
+    TTF_SetFontSize(font, PANEL_PT);
+    float lh = (float)TTF_GetFontHeight(font) + 2.0f;
+    float tx = x + 14.0f;
+    float ty = 12.0f;
+    SDL_Color title = { 235, 238, 246, 255 };
+    SDL_Color body = { 205, 212, 224, 255 };
+    draw_text(ren, font, tx, ty, "DETTAGLI", 8, title);
+    ty += lh * 1.7f;
+    const char *p = text;
+    while (*p && ty + lh < h) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        draw_text(ren, font, tx, ty, p, len, body);
+        ty += lh;
+        if (!nl)
+            break;
+        p = nl + 1;
+    }
+    free(text);
+}
+
+static void draw_status(SDL_Renderer *ren, TTF_Font *font, Model *m, App *app)
+{
+    SDL_SetRenderDrawColor(ren, 28, 30, 38, 255);
+    SDL_FRect bar = { 0, (float)(app->win_h - STATUS_H), (float)app->win_w,
+                      (float)STATUS_H };
+    SDL_RenderFillRect(ren, &bar);
+    char sel[200] = "nessuna";
+    if (app->sel_active && app->sel_is_branch &&
+        app->sel_branch < m->hist.branch_count) {
+        snprintf(sel, sizeof sel, "branch %s",
+                 m->hist.branches[app->sel_branch].name);
+    } else if (app->sel_active && app->sel_commit < m->data.commit_count) {
+        char sh[16];
+        gitdata_short_hash(m->data.commits[app->sel_commit].hash, 8, sh);
+        snprintf(sel, sizeof sel, "commit %s", sh);
+    }
+    char line[512];
+    snprintf(line, sizeof line,
+             "commit visibili: %zu   corsie: %zu   filtro: nessuno   "
+             "selezione: %s",
+             m->sc.dot_count, m->sc.lane_count, sel);
+    if (!font)
+        return;
+    TTF_SetFontSize(font, STATUS_PT);
+    SDL_Color fg = { 190, 197, 210, 255 };
+    draw_text(ren, font, 10.0f, (float)(app->win_h - STATUS_H) + 4.0f, line,
+              strlen(line), fg);
+}
+
+static void draw_frame(SDL_Renderer *ren, TTF_Font *font, Model *m, App *app)
+{
+    const View *v = &app->view;
+    SDL_SetRenderDrawColor(ren, 18, 20, 26, 255);
+    SDL_RenderClear(ren);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+
+    double vis_rows = (v->height + 2 * MARGIN_Y) / (ROW_H * v->zoom);
+    double vis_cols = (v->width + 2 * MARGIN_X) / (LANE_W * v->zoom);
+    double r0 = v->off_y - 1, r1 = v->off_y + vis_rows + 1;
+    double c0 = v->off_x - 1, c1 = v->off_x + vis_cols + 1;
+
+    /* archi: sotto i punti, cosi' i nodi restano leggibili */
+    for (size_t i = 0; i < m->sc.line_count; i++) {
+        const RenderLine *ln = &m->sc.lines[i];
+        double lo = ln->pts[0].y, hi = ln->pts[0].y, lox = ln->pts[0].x,
+               hix = ln->pts[0].x;
+        for (size_t k = 1; k < ln->n; k++) {
+            if (ln->pts[k].y < lo)
+                lo = ln->pts[k].y;
+            if (ln->pts[k].y > hi)
+                hi = ln->pts[k].y;
+            if (ln->pts[k].x < lox)
+                lox = ln->pts[k].x;
+            if (ln->pts[k].x > hix)
+                hix = ln->pts[k].x;
+        }
+        if (hi < r0 || lo > r1 || hix < c0 || lox > c1)
+            continue;
+        bool hot = false, dim = false;
+        if (app->sel_active) {
+            if (app->sel_is_branch) {
+                hot = ln->kind == RENDER_LINE_BRANCH &&
+                      ln->from < m->lay.commit_count &&
+                      m->lay.commits[ln->from].owner == app->sel_branch;
+                dim = !hot;
+            } else {
+                hot = ln->from == app->sel_commit || ln->to == app->sel_commit;
+            }
+        }
+        uint8_t rgb[3];
+        render_lane_color(ln->lane, rgb);
+        Uint8 alpha = 205;
+        float w = 3.0f * (float)v->zoom;
+        if (ln->kind == RENDER_LINE_MERGE_PARENT) {
+            /* il merge non e' una catena: piu' sottile e piu' trasparente,
+             * cosi' non sembra puntare alla punta del branch */
+            alpha = 140;
+            w = 1.6f * (float)v->zoom;
+        } else if (ln->dashed) {
+            w = 2.0f;
+        }
+        if (hot) {
+            alpha = 255;
+            w = 4.0f * (float)v->zoom;
+        } else if (dim) {
+            alpha = 55;
+        }
+        SDL_SetRenderDrawColor(ren, rgb[0], rgb[1], rgb[2], alpha);
+        stroke_path(ren, v, ln, w);
+    }
+
+    /* punti dei commit (in ordine di riga: si puo' interrompere presto) */
+    float r = DOT_R * (float)v->zoom;
+    for (size_t i = 0; i < m->sc.dot_count; i++) {
+        const RenderDot *d = &m->sc.dots[i];
+        if ((double)d->row < r0)
+            continue;
+        if ((double)d->row > r1)
+            break;
+        bool hot = false;
+        Uint8 alpha = 255;
+        if (app->sel_active && app->sel_is_branch) {
+            hot = d->commit < m->lay.commit_count &&
+                  m->lay.commits[d->commit].owner == app->sel_branch;
+            alpha = hot ? 255 : 55;
+        } else if (app->sel_active) {
+            hot = d->commit == app->sel_commit;
+        }
+        uint8_t rgb[3];
+        render_lane_color(d->lane, rgb);
+        float cx = px(v, d->p.x), cy = py(v, d->p.y);
+        if (hot) {
+            SDL_SetRenderDrawColor(ren, 120, 220, 255, 255);
+            fill_circle(ren, cx, cy, r + 4.0f * (float)v->zoom);
+        }
+        if (d->head) {
+            SDL_SetRenderDrawColor(ren, 245, 246, 250, alpha);
+            fill_circle(ren, cx, cy, r + 3.0f * (float)v->zoom);
+        }
+        if (d->merge_target) {
+            /* anello della destinazione di un merge: dice dove arriva davvero
+             * l'arco anche se il branch prosegue oltre */
+            SDL_SetRenderDrawColor(ren, 188, 196, 214, alpha);
+            fill_circle(ren, cx, cy, r + 2.2f * (float)v->zoom);
+        }
+        if (d->anon) {
+            SDL_SetRenderDrawColor(ren, (Uint8)(rgb[0] / 2 + 60),
+                                   (Uint8)(rgb[1] / 2 + 60),
+                                   (Uint8)(rgb[2] / 2 + 60), alpha);
+        } else {
+            SDL_SetRenderDrawColor(ren, rgb[0], rgb[1], rgb[2], alpha);
+        }
+        fill_circle(ren, cx, cy, r);
+    }
+
+    /* etichette dei riferimenti: gruppi uniti, impilati con lo slot */
+    if (font && v->zoom >= 0.5) {
+        TTF_SetFontSize(font, LABEL_PT * (float)v->zoom);
+        int fh = TTF_GetFontHeight(font);
+        float slot_h = (float)fh + 4.0f;
+        for (size_t i = 0; i < m->sc.anchor_count; i++) {
+            const RenderAnchor *a = &m->sc.anchors[i];
+            if (a->row == NO_IDX || (double)a->row < r0 ||
+                (double)a->row > r1)
+                continue;
+            Uint8 alpha = 255;
+            if (app->sel_active && app->sel_is_branch && a->branch != app->sel_branch)
+                alpha = 70;
+            float x = px(v, a->p.x) + 9.0f * (float)v->zoom;
+            float y = py(v, a->p.y) - fh / 2.0f + (float)a->slot * slot_h;
+            SDL_Color fg = { 235, 235, 240, 255 };
+            Uint8 br = 30, bgc = 34, bb = 44;
+            if (a->kind == RENDER_LABEL_TAG) {
+                /* tag: colore diverso dai branch */
+                fg.r = 226;
+                fg.g = 200;
+                fg.b = 120;
+                br = 56;
+                bgc = 46;
+                bb = 18;
+            } else if (a->is_head) {
+                fg.r = 255;
+                fg.g = 230;
+                fg.b = 120;
+                br = 60;
+                bgc = 52;
+                bb = 20;
+            } else if (a->has_remote) {
+                fg.r = fg.g = fg.b = 170;
+            }
+            draw_label(ren, font, x, y, fg, br, bgc, bb, alpha, a->text);
+        }
+    }
+
+    if (app->panel_on)
+        draw_panel(ren, font, m, app);
+    draw_status(ren, font, m, app);
+}
+
+/* Click sinistro senza trascinamento: commit, etichetta o vuoto. */
+static void handle_click(Model *m, App *app, float mx, float my)
+{
+    if (app->panel_on && mx >= (float)(app->win_w - PANEL_W))
+        return; /* il pannello non seleziona */
+    if (my >= (float)(app->win_h - STATUS_H))
+        return; /* la barra di stato non seleziona */
+    const View *v = &app->view;
+    double sx = (mx - MARGIN_X) / (LANE_W * v->zoom) + v->off_x;
+    double sy = (my - MARGIN_Y) / (ROW_H * v->zoom) + v->off_y;
+    double rx = (DOT_R + 5.0) / (LANE_W * v->zoom);
+    double ry = (DOT_R + 5.0) / (ROW_H * v->zoom);
+    size_t ci = render_commit_at(&m->sc, sx, sy, rx, ry);
+    if (ci != NO_IDX) {
+        app_select_commit(m, app, ci);
+        return;
+    }
+    size_t ai = render_label_at(&m->sc, sx, sy);
+    if (ai != NO_IDX) {
+        const RenderAnchor *a = &m->sc.anchors[ai];
+        if (a->kind == RENDER_LABEL_BRANCH && a->branch != NO_IDX)
+            app_select_branch(m, app, a->branch);
+        else
+            app_select_commit(m, app, a->commit);
+        return;
+    }
+    app_clear_selection(app);
+}
+
+static void handle_key(const SDL_KeyboardEvent *k, Model *m, App *app,
+                       bool *running)
+{
+    View *v = &app->view;
+    if (k->key == SDLK_ESCAPE) {
+        if (app->sel_active)
+            app_clear_selection(app);
+        else
+            *running = false;
+        return;
+    }
+    if (k->key == SDLK_TAB) {
+        app->panel_on = !app->panel_on;
+        app_resize(m, app);
+        return;
+    }
+    if (k->key == SDLK_C) {
+        if (app->sel_active && app->sel_commit < m->data.commit_count)
+            SDL_SetClipboardText(m->data.commits[app->sel_commit].hash);
+        return;
+    }
+    if (k->key == SDLK_DOWN)
+        v->off_y += 1;
+    else if (k->key == SDLK_UP)
+        v->off_y -= 1;
+    else if (k->key == SDLK_RIGHT)
+        v->off_x += 1;
+    else if (k->key == SDLK_LEFT)
+        v->off_x -= 1;
+    else if (k->key == SDLK_PAGEDOWN)
+        v->off_y += 10;
+    else if (k->key == SDLK_PAGEUP)
+        v->off_y -= 10;
+    else if (k->key == SDLK_HOME)
+        v->off_y = 0;
+    else if (k->key == SDLK_END)
+        v->off_y = 1e9;
+    else if (k->key == SDLK_PLUS || k->key == SDLK_EQUALS ||
+             k->key == SDLK_KP_PLUS)
+        v->zoom *= 1.1;
+    else if (k->key == SDLK_MINUS || k->key == SDLK_KP_MINUS)
+        v->zoom /= 1.1;
+    else if (k->key == SDLK_0) {
+        v->zoom = 1.0;
+        v->off_x = 0;
+        v->off_y = 0;
+    }
+    view_clamp(v, m->sc.lane_count, m->sc.rows);
 }
 
 int main(int argc, char **argv)
@@ -414,25 +693,11 @@ int main(int argc, char **argv)
     }
 
     char err[1024];
-    GitData data;
-    if (!gitdata_load(&data, opt.repo, err, sizeof err)) {
+    Model m;
+    if (!model_load(&m, opt.repo, err, sizeof err)) {
         fprintf(stderr, "errore: %s\n", err);
         return 1;
     }
-    GraphConfig cfg;
-    load_config(&data, &cfg);
-
-    History hist;
-    if (!history_build(&hist, &data, &cfg, err, sizeof err)) {
-        fprintf(stderr, "errore: %s\n", err);
-        config_free(&cfg);
-        gitdata_free(&data);
-        return 1;
-    }
-    Layout lay;
-    layout_build(&lay, &hist);
-    Render sc;
-    render_build(&sc, &data, &hist, &lay);
 
     bool headless = opt.headless || opt.screenshot != NULL || opt.frames > 0;
     if (headless)
@@ -440,11 +705,7 @@ int main(int argc, char **argv)
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
-        render_free(&sc);
-        layout_free(&lay);
-        history_free(&hist);
-        config_free(&cfg);
-        gitdata_free(&data);
+        model_free(&m);
         return 1;
     }
 
@@ -458,17 +719,14 @@ int main(int argc, char **argv)
         if (win)
             SDL_DestroyWindow(win);
         SDL_Quit();
-        render_free(&sc);
-        layout_free(&lay);
-        history_free(&hist);
-        config_free(&cfg);
-        gitdata_free(&data);
+        model_free(&m);
         return 1;
     }
     printf("render: %zu commit, %zu corsie, %zu righe, %zu archi, %zu etichette "
            "(driver %s, renderer %s)\n",
-           sc.dot_count, sc.lane_count, sc.rows, sc.line_count, sc.anchor_count,
-           SDL_GetCurrentVideoDriver(), SDL_GetRendererName(ren));
+           m.sc.dot_count, m.sc.lane_count, m.sc.rows, m.sc.line_count,
+           m.sc.anchor_count, SDL_GetCurrentVideoDriver(),
+           SDL_GetRendererName(ren));
     fflush(stdout);
 
     TTF_Font *font = NULL;
@@ -491,13 +749,15 @@ int main(int argc, char **argv)
                 SDL_GetError());
     }
 
-    View view;
-    view.off_x = 0;
-    view.off_y = 0;
-    view.zoom = 1.0;
-    view.width = opt.width;
-    view.height = opt.height;
-    view_clamp(&view, sc.lane_count, sc.rows);
+    App app;
+    memset(&app, 0, sizeof app);
+    app.sel_commit = NO_IDX;
+    app.sel_branch = NO_IDX;
+    app.view.off_x = 0;
+    app.view.off_y = 0;
+    app.view.zoom = 1.0;
+    SDL_GetWindowSizeInPixels(win, &app.win_w, &app.win_h);
+    app_resize(&m, &app);
 
     bool running = true;
     if (headless) {
@@ -510,8 +770,9 @@ int main(int argc, char **argv)
             }
             if (!running)
                 break;
-            SDL_GetWindowSizeInPixels(win, &view.width, &view.height);
-            draw_frame(ren, font, &view, &sc);
+            SDL_GetWindowSizeInPixels(win, &app.win_w, &app.win_h);
+            app_resize(&m, &app);
+            draw_frame(ren, font, &m, &app);
             SDL_RenderPresent(ren);
         }
         if (opt.screenshot) {
@@ -531,10 +792,12 @@ int main(int argc, char **argv)
         }
     } else {
         bool dragging = false;
-        float drag_x = 0, drag_y = 0;
+        bool moved = false;
+        float down_x = 0, down_y = 0, last_x = 0, last_y = 0;
 
-        SDL_GetWindowSizeInPixels(win, &view.width, &view.height);
-        draw_frame(ren, font, &view, &sc);
+        SDL_GetWindowSizeInPixels(win, &app.win_w, &app.win_h);
+        app_resize(&m, &app);
+        draw_frame(ren, font, &m, &app);
         SDL_RenderPresent(ren);
 
         while (running) {
@@ -545,34 +808,43 @@ int main(int argc, char **argv)
                 if (ev.type == SDL_EVENT_QUIT)
                     running = false;
                 else if (ev.type == SDL_EVENT_KEY_DOWN)
-                    handle_key(&ev.key, &view, &running, sc.lane_count, sc.rows);
+                    handle_key(&ev.key, &m, &app, &running);
                 else if (ev.type == SDL_EVENT_MOUSE_WHEEL) {
                     if (SDL_GetModState() & SDL_KMOD_CTRL) {
-                        view.zoom *= (ev.wheel.y > 0) ? 1.1 : 1 / 1.1;
-                        view_clamp(&view, sc.lane_count, sc.rows);
+                        app.view.zoom *= (ev.wheel.y > 0) ? 1.1 : 1 / 1.1;
+                        app_resize(&m, &app);
                     } else {
-                        view.off_y -= ev.wheel.y;
-                        view.off_x -= ev.wheel.x;
-                        view_clamp(&view, sc.lane_count, sc.rows);
+                        app.view.off_y -= ev.wheel.y;
+                        app.view.off_x -= ev.wheel.x;
+                        view_clamp(&app.view, m.sc.lane_count, m.sc.rows);
                     }
                 } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
                            ev.button.button == SDL_BUTTON_LEFT) {
                     dragging = true;
-                    drag_x = ev.button.x;
-                    drag_y = ev.button.y;
+                    moved = false;
+                    down_x = last_x = ev.button.x;
+                    down_y = last_y = ev.button.y;
                 } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_UP &&
                            ev.button.button == SDL_BUTTON_LEFT) {
+                    if (dragging && !moved)
+                        handle_click(&m, &app, ev.button.x, ev.button.y);
                     dragging = false;
                 } else if (ev.type == SDL_EVENT_MOUSE_MOTION && dragging) {
-                    view.off_x -= (ev.motion.x - drag_x) / (LANE_W * view.zoom);
-                    view.off_y -= (ev.motion.y - drag_y) / (ROW_H * view.zoom);
-                    drag_x = ev.motion.x;
-                    drag_y = ev.motion.y;
-                    view_clamp(&view, sc.lane_count, sc.rows);
+                    if (fabsf(ev.motion.x - down_x) > 3.0f ||
+                        fabsf(ev.motion.y - down_y) > 3.0f)
+                        moved = true;
+                    app.view.off_x -=
+                        (ev.motion.x - last_x) / (LANE_W * app.view.zoom);
+                    app.view.off_y -=
+                        (ev.motion.y - last_y) / (ROW_H * app.view.zoom);
+                    last_x = ev.motion.x;
+                    last_y = ev.motion.y;
+                    view_clamp(&app.view, m.sc.lane_count, m.sc.rows);
                 }
             } while (SDL_PollEvent(&ev));
-            SDL_GetWindowSizeInPixels(win, &view.width, &view.height);
-            draw_frame(ren, font, &view, &sc);
+            SDL_GetWindowSizeInPixels(win, &app.win_w, &app.win_h);
+            app_resize(&m, &app);
+            draw_frame(ren, font, &m, &app);
             SDL_RenderPresent(ren);
         }
     }
@@ -583,10 +855,6 @@ int main(int argc, char **argv)
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
-    render_free(&sc);
-    layout_free(&lay);
-    history_free(&hist);
-    config_free(&cfg);
-    gitdata_free(&data);
+    model_free(&m);
     return 0;
 }

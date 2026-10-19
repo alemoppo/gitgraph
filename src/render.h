@@ -101,6 +101,9 @@ typedef struct {
     char *text;       /* nomi uniti da ", " (es. "branch1, origin/branch1") */
     bool is_head;     /* un riferimento del gruppo e' il branch corrente */
     bool has_remote;  /* almeno un riferimento del gruppo e' remoto */
+    size_t branch;    /* branch rappresentante del gruppo (il locale, se c'e'),
+                         SIZE_MAX per un gruppo di soli tag */
+    double w;         /* larghezza nominale del gruppo, in corsie */
 } RenderAnchor;
 
 typedef struct {
@@ -113,6 +116,15 @@ typedef struct {
     size_t lane_count;
     size_t rows;
 } Render;
+
+/* Geometria nominale delle etichette, in unita' di scena: il testo comincia a
+ * destra del punto (RENDER_LABEL_DX), ogni carattere vale RENDER_LABEL_CHAR
+ * corsie piu' RENDER_LABEL_PAD di margine, e ogni slot occupa una riga. La usa
+ * la ricerca sotto il puntatore; il disegnatore la segue da vicino. */
+#define RENDER_LABEL_DX 0.45
+#define RENDER_LABEL_CHAR 0.30
+#define RENDER_LABEL_PAD 0.45
+#define RENDER_LABEL_H 0.90
 
 #define RENDER_PALETTE_SIZE 16
 
@@ -127,5 +139,25 @@ void render_build(Render *out, const GitData *data, const History *hist,
                   const Layout *lay);
 
 void render_free(Render *r);
+
+/* ---- selezione e dettagli (fase 6) ---------------------------------------- */
+
+/* Indice della cella del commit sotto il punto (x, y in unita' di scena) entro
+ * l'ellisse di semiassi rx (corsie) e ry (righe), o SIZE_MAX se nessuna. A
+ * parita' di distanza vince la cella piu' vicina. */
+size_t render_commit_at(const Render *r, double x, double y, double rx,
+                        double ry);
+
+/* Indice del gruppo di etichette il cui rettangolo nominale contiene il punto
+ * (x, y in unita' di scena), o SIZE_MAX. */
+size_t render_label_at(const Render *r, double x, double y);
+
+/* Testo del pannello dei dettagli per il commit `commit` e, se `branch` non e'
+ * SIZE_MAX, per quel branch selezionato. `width` e' la larghezza in colonne:
+ * il messaggio va a capo e si ferma a 12 righe. Ritorna una stringa da
+ * liberare con free(), o NULL se il commit non esiste. */
+char *render_details_text(const GitData *data, const History *hist,
+                          const Layout *lay, size_t commit, size_t branch,
+                          size_t width);
 
 #endif /* GG_RENDER_H */
