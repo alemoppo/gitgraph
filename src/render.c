@@ -167,6 +167,7 @@ static void build_labels(Render *out, const GitData *data, const History *hist,
             an->branch = rep;
             an->w = RENDER_LABEL_PAD +
                     RENDER_LABEL_CHAR * (double)strlen(sb.data);
+            an->h = RENDER_LABEL_H;
         }
     }
     out->anchor_count = gi;
@@ -444,9 +445,8 @@ size_t render_label_at(const Render *r, double x, double y)
     for (size_t i = r->anchor_count; i > 0; i--) {
         const RenderAnchor *a = &r->anchors[i - 1];
         double x0 = a->p.x + RENDER_LABEL_DX;
-        double y0 = a->p.y + (double)a->slot - RENDER_LABEL_H / 2.0;
-        if (x >= x0 && x <= x0 + a->w && y >= y0 &&
-            y <= y0 + RENDER_LABEL_H)
+        double y0 = a->p.y + (double)a->slot - a->h / 2.0;
+        if (x >= x0 && x <= x0 + a->w && y >= y0 && y <= y0 + a->h)
             return i - 1;
     }
     return NO_IDX;

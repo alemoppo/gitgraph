@@ -114,6 +114,7 @@ typedef struct {
                          SIZE_MAX per un gruppo di soli tag */
     double w;         /* larghezza in corsie: nominale o misurata dal
                          disegnatore */
+    double h;         /* altezza in righe: nominale o misurata dal disegnatore */
 } RenderAnchor;
 
 typedef struct {
@@ -130,7 +131,8 @@ typedef struct {
 /* Geometria nominale delle etichette, in unita' di scena: il testo comincia a
  * destra del punto (RENDER_LABEL_DX), ogni carattere vale RENDER_LABEL_CHAR
  * corsie piu' RENDER_LABEL_PAD di margine, e ogni slot occupa una riga. La usa
- * la ricerca sotto il puntatore; il disegnatore la segue da vicino. */
+ * la ricerca sotto il puntatore; il disegnatore puo' sostituire w e h con le
+ * misure reali del font, restando nelle stesse unita'. */
 #define RENDER_LABEL_DX 0.45
 #define RENDER_LABEL_CHAR 0.30
 #define RENDER_LABEL_PAD 0.45

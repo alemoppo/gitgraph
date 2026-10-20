@@ -271,9 +271,12 @@ static void update_label_widths(Render *sc, TTF_Font *font)
     TTF_SetFontSize(font, LABEL_PT);
     for (size_t i = 0; i < sc->anchor_count; i++) {
         RenderAnchor *a = &sc->anchors[i];
-        int w = 0, h = 0;
-        if (TTF_GetStringSize(font, a->text, strlen(a->text), &w, &h) && w > 0)
-            a->w = ((double)w + 2.0 * LABEL_PAD) / (double)LANE_W;
+        int tw = 0, th = 0;
+        if (TTF_GetStringSize(font, a->text, strlen(a->text), &tw, &th) &&
+            tw > 0) {
+            a->w = ((double)tw + 2.0 * LABEL_PAD) / (double)LANE_W;
+            a->h = ((double)th + 2.0 * LABEL_PAD) / (double)ROW_H;
+        }
     }
 }
 
