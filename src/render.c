@@ -406,6 +406,16 @@ void render_free(Render *r)
 
 /* ---- selezione e dettagli (fase 6) ---------------------------------------- */
 
+bool render_has_commit(const Render *r, size_t commit)
+{
+    if (!r)
+        return false;
+    for (size_t i = 0; i < r->dot_count; i++)
+        if (r->dots[i].commit == commit)
+            return true;
+    return false;
+}
+
 size_t render_commit_at(const Render *r, double x, double y, double rx,
                         double ry)
 {
@@ -460,18 +470,31 @@ static const char *parent_state_name(ParentState st)
 
 static void format_date(int64_t unix_time, char out[32])
 {
+    out[0] = '-';
+    out[1] = '\0';
     time_t t = (time_t)unix_time;
+    /* se time_t e' piu' stretto di int64_t, la conversione puo' troncare:
+     * il round-trip la rende esplicita e ci fermiamo sul fallback */
+    if ((int64_t)t != unix_time)
+        return;
     struct tm tmv;
 #ifdef _WIN32
-    gmtime_s(&tmv, &t);
+    if (gmtime_s(&tmv, &t) != 0)
+        return;
 #else
-    gmtime_r(&t, &tmv);
+    if (!gmtime_r(&t, &tmv))
+        return;
 #endif
-    strftime(out, 32, "%Y-%m-%d %H:%MZ", &tmv);
+    if (strftime(out, 32, "%Y-%m-%d %H:%MZ", &tmv) == 0) {
+        out[0] = '-';
+        out[1] = '\0';
+    }
 }
 
-/* Aggiunge il testo mandando a capo a `width` colonne, spezzando sulle spazi
- * quando c'e' posto; si ferma dopo `max_lines` righe. */
+/* Aggiunge il testo mandando a capo a `width` byte, spezzando sulle spazi
+ * quando c'e' posto; si ferma dopo `max_lines` righe. Il taglio non spezza
+ * mai una sequenza UTF-8: se cade dentro un carattere multibyte arretra al
+ * confine precedente. */
 static void append_wrapped(StrBuf *sb, const char *text, size_t width,
                            size_t max_lines)
 {
@@ -489,6 +512,16 @@ static void append_wrapped(StrBuf *sb, const char *text, size_t width,
             size_t take = seg - off;
             if (take > width) {
                 take = width;
+                /* se il taglio cade dentro un carattere UTF-8, torna al
+                 * primo byte del carattere */
+                if (((unsigned char)p[off + take] & 0xC0) == 0x80) {
+                    size_t b = take;
+                    while (b > 0 &&
+                           ((unsigned char)p[off + b] & 0xC0) == 0x80)
+                        b--;
+                    if (b > 0)
+                        take = b;
+                }
                 size_t br = take;
                 while (br > 0 && p[off + br] != ' ')
                     br--;

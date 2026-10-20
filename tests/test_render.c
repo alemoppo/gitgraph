@@ -73,6 +73,33 @@ static bool pt_eq(RenderPt p, double x, double y)
     return p.x == x && p.y == y;
 }
 
+/* Struttura UTF-8 valida. Non serve validare overlong o surrogati: qui conta
+ * solo che il wrapping non tagli una sequenza a meta'. */
+static bool utf8_valid(const char *s)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        size_t n;
+        if (*p < 0x80) {
+            p++;
+            continue;
+        }
+        if ((*p & 0xE0) == 0xC0)
+            n = 2;
+        else if ((*p & 0xF0) == 0xE0)
+            n = 3;
+        else if ((*p & 0xF8) == 0xF0)
+            n = 4;
+        else
+            return false;
+        for (size_t i = 1; i < n; i++)
+            if ((p[i] & 0xC0) != 0x80)
+                return false;
+        p += n;
+    }
+    return true;
+}
+
 /* ---- invarianti dei percorsi ---------------------------------------------- */
 
 static bool strictly_between(double v, double a, double b)
@@ -238,6 +265,9 @@ static void test_hand_built(void)
           "commit_at: fuori raggio nessun commit");
     CHECK(render_commit_at(&sc, 0.0, 0.0, 0.0, 0.5) == NO_IDX,
           "commit_at: raggio nullo nessun commit");
+    CHECK(render_has_commit(&sc, 1), "has_commit: commit visibile");
+    CHECK(!render_has_commit(&sc, 3), "has_commit: commit assente");
+    CHECK(!render_has_commit(NULL, 0), "has_commit: scena nulla");
 
     render_free(&sc);
 }
@@ -829,6 +859,60 @@ static void test_details_wrap(void)
     free(t);
     CHECK(render_details_text(&d, &h, &lay, 5, NO_IDX, 40) == NULL,
           "dettagli: commit fuori intervallo senza testo");
+
+    /* il taglio a capo non deve spezzare le sequenze UTF-8 (2, 3 e 4 byte) */
+    static const char emoji[] =
+        "\xF0\x9F\x98\x80\xF0\x9F\x98\x80\xF0\x9F\x98\x80\xF0\x9F\x98\x80"
+        "\xF0\x9F\x98\x80\xF0\x9F\x98\x80\xF0\x9F\x98\x80\xF0\x9F\x98\x80"
+        "\xF0\x9F\x98\x80\xF0\x9F\x98\x80";
+    static const char euro[] =
+        "\xE2\x82\xAC\xE2\x82\xAC\xE2\x82\xAC\xE2\x82\xAC\xE2\x82\xAC"
+        "\xE2\x82\xAC\xE2\x82\xAC\xE2\x82\xAC\xE2\x82\xAC\xE2\x82\xAC";
+    static const char accent[] =
+        "\xC3\xA0\xC3\xA0\xC3\xA0\xC3\xA0\xC3\xA0\xC3\xA0\xC3\xA0\xC3\xA0"
+        "\xC3\xA0\xC3\xA0";
+    GitCommit c2 = c;
+    c2.date = INT64_MAX;
+    c2.message = (char *)emoji;
+    GitData d2 = d;
+    d2.commits = &c2;
+    char *u = render_details_text(&d2, &h, &lay, 0, NO_IDX, 21);
+    CHECK(u && utf8_valid(u), "dettagli: wrapping UTF-8 a 4 byte");
+    CHECK(u && strstr(u, "\xF0\x9F\x98\x80\xF0\x9F\x98\x80\xF0\x9F\x98\x80"
+                         "\xF0\x9F\x98\x80\n"),
+          "dettagli: quattro emoji sulla stessa riga");
+    CHECK(u && !strstr(u, "data:   \n"), "dettagli: data non vuota");
+#ifdef _WIN32
+    CHECK(u && strstr(u, "data:   -\n"),
+          "dettagli: data fuori intervallo resa come '-'");
+#endif
+    free(u);
+
+    c2.message = (char *)euro;
+    u = render_details_text(&d2, &h, &lay, 0, NO_IDX, 22);
+    CHECK(u && utf8_valid(u), "dettagli: wrapping UTF-8 a 3 byte");
+    free(u);
+
+    c2.message = (char *)accent;
+    u = render_details_text(&d2, &h, &lay, 0, NO_IDX, 21);
+    CHECK(u && utf8_valid(u), "dettagli: wrapping UTF-8 a 2 byte");
+    free(u);
+
+    /* date normali, negative e fuori intervallo: la riga non resta mai vuota */
+    c2.date = 0;
+    c2.message = (char *)"data zero";
+    u = render_details_text(&d2, &h, &lay, 0, NO_IDX, 40);
+    CHECK(u && strstr(u, "data:   1970-01-01 00:00Z\n"),
+          "dettagli: data zero non formattata");
+    free(u);
+    c2.date = -1;
+    u = render_details_text(&d2, &h, &lay, 0, NO_IDX, 40);
+    CHECK(u && !strstr(u, "data:   \n"), "dettagli: data negativa vuota");
+    free(u);
+    c2.date = INT64_MIN;
+    u = render_details_text(&d2, &h, &lay, 0, NO_IDX, 40);
+    CHECK(u && !strstr(u, "data:   \n"), "dettagli: data INT64_MIN vuota");
+    free(u);
 }
 
 /* Filtro degli antenati di branch2 sul repository di prova: 6 commit

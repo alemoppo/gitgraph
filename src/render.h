@@ -112,7 +112,8 @@ typedef struct {
     bool has_remote;  /* almeno un riferimento del gruppo e' remoto */
     size_t branch;    /* branch rappresentante del gruppo (il locale, se c'e'),
                          SIZE_MAX per un gruppo di soli tag */
-    double w;         /* larghezza nominale del gruppo, in corsie */
+    double w;         /* larghezza in corsie: nominale o misurata dal
+                         disegnatore */
 } RenderAnchor;
 
 typedef struct {
@@ -173,6 +174,10 @@ void render_build(Render *out, const GitData *data, const History *hist,
 void render_free(Render *r);
 
 /* ---- selezione e dettagli (fase 6) ---------------------------------------- */
+
+/* true se il commit compare nella scena (cioe' e' visibile col filtro usato
+ * per costruirla). */
+bool render_has_commit(const Render *r, size_t commit);
 
 /* Indice della cella del commit sotto il punto (x, y in unita' di scena) entro
  * l'ellisse di semiassi rx (corsie) e ry (righe), o SIZE_MAX se nessuna. A
