@@ -87,6 +87,16 @@ importate (SDL3, SDL3_ttf e le loro dipendenze) vengono copiate accanto
 all'eseguibile, cosi' funziona anche senza la directory dei binari di SDL nel
 PATH.
 
+## Eseguibile precompilato (bin/)
+
+La cartella `bin/` del repository contiene `gitgraph.exe` gia' compilato per
+Windows x64 (Release) con le DLL necessarie: SDL3, SDL3_ttf e le dipendenze
+transitive (FreeType, HarfBuzz, GLib, ...). Non serve installare SDL. Servono
+Windows 10/11 a 64 bit e **Git nel PATH** (Git non e' incluso); i testi delle
+licenze dei componenti sono in `bin/licenses/`. Le DLL sono incluse invece di
+linkare staticamente SDL3_ttf e le sue dipendenze, che richiederebbe una build
+statica custom (con componenti LGPL).
+
 ## Configurazione: graph.cfg
 
 Il file è **facoltativo** e si legge da `<radice-repository>/graph.cfg`.

@@ -6,3 +6,6 @@ build*/
 *.o
 *.obj
 *.exe
+
+# l'eseguibile precompilato in bin/ e' versionato apposta
+!bin/gitgraph.exe
