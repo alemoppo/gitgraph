@@ -42,6 +42,7 @@
 #define MARGIN_Y 28.0f
 #define DOT_R 5.0f
 #define LABEL_PT 13.0f
+#define LABEL_PAD 3.0f
 #define PANEL_PT 12.0f
 #define STATUS_PT 12.0f
 #define PANEL_W 380
@@ -97,6 +98,7 @@ typedef struct {
     FilterKind filter;
     size_t filter_branch; /* branch del filtro ancestrale */
     const char *repo;     /* per F5: ricaricare lo stesso repository */
+    TTF_Font *font;       /* per misurare le etichette dopo un rebuild */
 } App;
 
 static const char *const g_font_candidates[] = {
@@ -112,7 +114,8 @@ static void print_help(void)
            "              [--select HASH|BRANCH] [--filter local|ancestors:BRANCH]\n"
            "              [--help] [percorso-repo]\n"
            "  percorso-repo  default: directory corrente\n"
-           "  --select       seleziona un commit (hash o prefisso) o un branch\n"
+           "  --select       seleziona un commit (hash o prefisso) o un branch;\n"
+           "                 col filtro deve restare visibile, altrimenti errore\n"
            "  --filter       vista filtrata: local (senza remoti) oppure\n"
            "                 ancestors:BRANCH (storia ancestrale del branch)\n"
            "comandi: click sinistro = seleziona, C = copia l'hash, Tab =\n"
@@ -234,8 +237,8 @@ static void draw_text(SDL_Renderer *ren, TTF_Font *font, float x, float y,
 }
 
 static void draw_label(SDL_Renderer *ren, TTF_Font *font, float x, float y,
-                       SDL_Color fg, Uint8 bg_r, Uint8 bg_g, Uint8 bg_b,
-                       Uint8 alpha, const char *text)
+                       float pad, SDL_Color fg, Uint8 bg_r, Uint8 bg_g,
+                       Uint8 bg_b, Uint8 alpha, const char *text)
 {
     if (!font)
         return;
@@ -245,7 +248,6 @@ static void draw_label(SDL_Renderer *ren, TTF_Font *font, float x, float y,
         return;
     SDL_Texture *t = SDL_CreateTextureFromSurface(ren, s);
     if (t) {
-        float pad = 3.0f;
         SDL_FRect bg = { x, y, (float)s->w + 2 * pad, (float)s->h + 2 * pad };
         SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(ren, bg_r, bg_g, bg_b,
@@ -256,6 +258,23 @@ static void draw_label(SDL_Renderer *ren, TTF_Font *font, float x, float y,
         SDL_DestroyTexture(t);
     }
     SDL_DestroySurface(s);
+}
+
+/* Sostituisce la larghezza nominale delle etichette con quella misurata dal
+ * font. La misura e' a zoom 1 e in unita' di scena non dipende dallo zoom; il
+ * padding viene anch'esso scalato dal disegnatore, quindi il rettangolo del
+ * hit-test resta coerente. Il hit-test stesso resta in render.c, senza SDL. */
+static void update_label_widths(Render *sc, TTF_Font *font)
+{
+    if (!font)
+        return;
+    TTF_SetFontSize(font, LABEL_PT);
+    for (size_t i = 0; i < sc->anchor_count; i++) {
+        RenderAnchor *a = &sc->anchors[i];
+        int w = 0, h = 0;
+        if (TTF_GetStringSize(font, a->text, strlen(a->text), &w, &h) && w > 0)
+            a->w = ((double)w + 2.0 * LABEL_PAD) / (double)LANE_W;
+    }
 }
 
 static void load_config(const GitData *data, GraphConfig *cfg)
@@ -369,6 +388,7 @@ static void scene_rebuild(Model *m, App *app)
     } else {
         render_build(&m->sc, &m->data, &m->hist, &m->lay, NULL);
     }
+    update_label_widths(&m->sc, app->font);
     app_resize(m, app);
 }
 
@@ -377,6 +397,8 @@ static void app_apply_filter(Model *m, App *app, FilterKind kind, size_t branch)
     app->filter = kind;
     app->filter_branch = (kind == FILTER_ANCESTORS) ? branch : NO_IDX;
     scene_rebuild(m, app);
+    if (app->sel_active && !render_has_commit(&m->sc, app->sel_commit))
+        app_clear_selection(app);
 }
 
 /* Tasto A: via selezione e filtri, vista intera. */
@@ -475,24 +497,32 @@ static bool app_prepare(Model *m, App *app, const Options *opt)
         size_t bi = history_find_branch(&m->hist, opt->select);
         if (bi != NO_IDX && m->hist.branches[bi].tip_pos != NO_IDX) {
             app_select_branch(m, app, bi);
-            return true;
+        } else {
+            size_t len = strlen(opt->select);
+            size_t found = 0, ci = NO_IDX;
+            if (len >= 4) {
+                for (size_t i = 0; i < m->data.commit_count; i++)
+                    if (strncmp(m->data.commits[i].hash, opt->select, len) ==
+                        0) {
+                        if (ci == NO_IDX)
+                            ci = i;
+                        found++;
+                    }
+            }
+            if (found != 1) {
+                fprintf(stderr,
+                        "selezione: '%s' non trovato o ambiguo (%zu)\n",
+                        opt->select, found);
+                return false;
+            }
+            app_select_commit(m, app, ci);
         }
-        size_t len = strlen(opt->select);
-        size_t found = 0, ci = NO_IDX;
-        if (len >= 4) {
-            for (size_t i = 0; i < m->data.commit_count; i++)
-                if (strncmp(m->data.commits[i].hash, opt->select, len) == 0) {
-                    if (ci == NO_IDX)
-                        ci = i;
-                    found++;
-                }
-        }
-        if (found != 1) {
-            fprintf(stderr, "selezione: '%s' non trovato o ambiguo (%zu)\n",
-                    opt->select, found);
+        if (app->sel_active && !render_has_commit(&m->sc, app->sel_commit)) {
+            fprintf(stderr,
+                    "selezione: '%s' non visibile con il filtro richiesto\n",
+                    opt->select);
             return false;
         }
-        app_select_commit(m, app, ci);
     }
     return true;
 }
@@ -691,7 +721,11 @@ static void draw_frame(SDL_Renderer *ren, TTF_Font *font, Model *m, App *app)
     if (font && v->zoom >= 0.5) {
         TTF_SetFontSize(font, LABEL_PT * (float)v->zoom);
         int fh = TTF_GetFontHeight(font);
-        float slot_h = (float)fh + 4.0f;
+        /* lo slot vale una riga di scena, come nel hit-test; anche il padding
+         * scala con lo zoom, cosi' il rettangolo disegnato resta coerente */
+        float slot_h = ROW_H * (float)v->zoom;
+        float pad = LABEL_PAD * (float)v->zoom;
+        float label_h = (float)fh + 2.0f * pad;
         for (size_t i = 0; i < m->sc.anchor_count; i++) {
             const RenderAnchor *a = &m->sc.anchors[i];
             if (a->row == NO_IDX || (double)a->row < r0 ||
@@ -700,8 +734,9 @@ static void draw_frame(SDL_Renderer *ren, TTF_Font *font, Model *m, App *app)
             Uint8 alpha = 255;
             if (app->sel_active && app->sel_is_branch && a->branch != app->sel_branch)
                 alpha = 70;
-            float x = px(v, a->p.x) + 9.0f * (float)v->zoom;
-            float y = py(v, a->p.y) - fh / 2.0f + (float)a->slot * slot_h;
+            float x = px(v, a->p.x) +
+                      (float)(RENDER_LABEL_DX * LANE_W) * (float)v->zoom;
+            float y = py(v, a->p.y) + (float)a->slot * slot_h - label_h / 2.0f;
             SDL_Color fg = { 235, 235, 240, 255 };
             Uint8 br = 30, bgc = 34, bb = 44;
             if (a->kind == RENDER_LABEL_TAG) {
@@ -722,7 +757,7 @@ static void draw_frame(SDL_Renderer *ren, TTF_Font *font, Model *m, App *app)
             } else if (a->has_remote) {
                 fg.r = fg.g = fg.b = 170;
             }
-            draw_label(ren, font, x, y, fg, br, bgc, bb, alpha, a->text);
+            draw_label(ren, font, x, y, pad, fg, br, bgc, bb, alpha, a->text);
         }
     }
 
@@ -940,6 +975,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "avviso: TTF_Init: %s (etichette disattivate)\n",
                 SDL_GetError());
     }
+    app.font = font;
+    update_label_widths(&m.sc, font);
 
     SDL_GetWindowSizeInPixels(win, &app.win_w, &app.win_h);
     app_resize(&m, &app);
