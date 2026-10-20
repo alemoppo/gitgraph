@@ -102,7 +102,8 @@ statica custom (con componenti LGPL).
 Il file è **facoltativo** e si legge da `<radice-repository>/graph.cfg`.
 Se non c'è vale il tronco implicito (`main`, altrimenti `master`).
 Commenti su righe dedicate (`#` o `;`), sezioni nell'ordine che si preferisce,
-` chiave = valore ` con spazi attorno all'`=` ammessi:
+`chiave = valore` con spazi attorno all'`=` ammessi (e preferiti in `[parents]`
+quando il nome contiene `=`):
 
 ```ini
 # trunk e linee principali, nell'ordine di gerarchia
@@ -143,7 +144,10 @@ bugfix/1 = release/1.0
     diversa resta autonomo e ne conserva la genealogia dedotta: dal solo nome
     non si deduce una relazione di tracking.
 - **`[parents]`**: override manuali con precedenza sull'euristica; stato
-  `configurato`, non un fatto ricavato da Git. Niente wildcard.
+  `configurato`, non un fatto ricavato da Git. Niente wildcard. Se un nome
+  contiene `=` (valido in Git), il separatore è un `=` circondato da spazi:
+  `feature=experimental = main`. Senza spazi attorno all'`=` vale il primo `=`,
+  per compatibilità con il formato storico `branch=parent`.
 
 **Validazione**: un errore rifiuta il file per intero (niente
 configurazione a metà) e lo strumento ripiega sul tronco implicito; un
@@ -453,7 +457,10 @@ disegna N fotogrammi ed esce. Il font predefinito e' un font di sistema
 (`--font` per sceglierne un altro); senza font le etichette non vengono
 disegnate ma il grafo si'. `--select` seleziona all'avvio un branch (per nome)
 oppure un commit (hash completo o prefisso non ambiguo) e accende il pannello;
-`--filter` parte con la vista filtrata: `local` (senza remoti) oppure
+con `--filter` il commit selezionato deve restare visibile nella scena,
+altrimenti il programma esce con errore (per esempio `--filter local --select
+origin/feature` se `origin/feature` non è raggiungibile da un riferimento
+locale). `--filter` parte con la vista filtrata: `local` (senza remoti) oppure
 `ancestors:NOME` (storia ancestrale del branch). Servono soprattutto per gli
 screenshot headless, ma funzionano anche con la finestra.
 
