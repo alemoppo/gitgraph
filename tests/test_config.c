@@ -234,6 +234,31 @@ static void test_parse_and_wildcards(void)
         config_free(&cfg);
     }
 
+    /* un nome puo' contenere '=': il separatore e' un '=' con spazi attorno,
+     * mentre il formato storico senza spazi resta valido */
+    {
+        GraphConfig cfg;
+        ConfigReport rep;
+        const char *text =
+            "[parents]\n"
+            "feature=experimental = main\n"
+            "bugfix/1=release/1.0\n";
+        bool ok = load_text("uguale.cfg", text, &cfg, &rep);
+        CHECK(ok, "nome con '=': config_load fallita");
+        CHECK(!report_has(&rep, "errore"), "nome con '=': errori imprevisti");
+        CHECK(cfg.override_count == 2, "nome con '=': attesi 2 override, %zu",
+              cfg.override_count);
+        CHECK(override_parent(&cfg, "feature=experimental") &&
+                  strcmp(override_parent(&cfg, "feature=experimental"),
+                         "main") == 0,
+              "nome con '=': separatore con spazi non riconosciuto");
+        CHECK(override_parent(&cfg, "bugfix/1") &&
+                  strcmp(override_parent(&cfg, "bugfix/1"), "release/1.0") == 0,
+              "nome con '=': formato storico branch=parent non riconosciuto");
+        config_report_free(&rep);
+        config_free(&cfg);
+    }
+
     /* l'ordine della lista e' l'ordine di gerarchia; duplicati: avviso */
     {
         GraphConfig cfg;

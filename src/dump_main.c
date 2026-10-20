@@ -181,7 +181,9 @@ static void print_summary(const GitData *data, const History *hist,
 }
 
 /* Per ogni branch ambiguo con un suggerimento: commento con la motivazione e
- * riga gia' pronta per la sezione [parents] di graph.cfg. Non scrive nulla. */
+ * riga gia' pronta per la sezione [parents] di graph.cfg. Il separatore e' " = "
+ * (con spazi), quindi anche i nomi che contengono '=' restano validi. Non
+ * scrive nulla. */
 static void print_suggested_parents(const History *hist)
 {
     for (size_t i = 0; i < hist->branch_count; i++) {

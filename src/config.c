@@ -3,7 +3,9 @@
  * Parser di graph.cfg: sezioni [long-lived] e [parents], commenti su righe
  * dedicate, valori `chiave = valore`, wildcard '*' in [long-lived] (espansi
  * sui branch esistenti in ordine naturale, vale la prima riga che
- * corrisponde) e validazione con diagnostica (errori e avvisi). Nessuna
+ * corrisponde) e validazione con diagnostica (errori e avvisi). In [parents]
+ * il separatore e' un '=' con spazi attorno, cosi' i nomi che contengono '='
+ * restano validi; senza spazi vale il primo '=' (formato storico). Nessuna
  * dipendenza esterna, nessuna scrittura: il file viene solo letto.
  *
  * I commenti stanno solo su righe dedicate: un '#' o un ';' dentro una riga
@@ -259,6 +261,24 @@ bool config_refname_syntax_ok(const char *name)
 static bool has_wildcard(const char *s)
 {
     return strchr(s, '*') != NULL;
+}
+
+/* In [parents] il separatore preferito e' un '=' circondato da spazi: i nomi
+ * dei riferimenti Git non possono contenere spazi, quindi un branch come
+ * "feature=experimental" resta leggibile. Se non c'e' un '=' con spazi attorno
+ * si usa il primo '=', per compatibilita' con il formato storico
+ * "branch=parent". */
+static const char *parents_separator(const char *s, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] != '=')
+            continue;
+        bool left = i > 0 && isspace((unsigned char)s[i - 1]);
+        bool right = i + 1 < len && isspace((unsigned char)s[i + 1]);
+        if (left && right)
+            return s + i;
+    }
+    return memchr(s, '=', len);
 }
 
 /* ---------- stato del parser ---------- */
@@ -570,7 +590,7 @@ static bool parse_text(Parser *p, const char *text)
             break;
         }
         case SEC_PARENTS: {
-            const char *eq = memchr(line + skip, '=', line_len - skip);
+            const char *eq = parents_separator(line + skip, line_len - skip);
             if (!eq) {
                 diag(p, CONFIG_DIAG_ERROR, line_no,
                      "in [parents] ogni riga ha la forma 'branch = padre'");
