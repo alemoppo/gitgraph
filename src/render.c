@@ -578,8 +578,10 @@ char *render_details_text(const GitData *data, const History *hist,
         sb_appendf(&sb, "ramo: %s  (padre: %s)\n", b->name,
                    b->parent ? b->parent : "-");
         sb_appendf(&sb, "stato: %s\n", parent_state_name(b->state));
-        sb_appendf(&sb, "motivo: %s\n",
-                   (b->motivation && b->motivation[0]) ? b->motivation : "-");
+        sb_append(&sb, "motivo: ");
+        append_wrapped(&sb,
+                       (b->motivation && b->motivation[0]) ? b->motivation : "-",
+                       width > 10 ? width - 8 : width, 6);
         if (b->state == PARENT_AMBIGUOUS && b->suggested_parent)
             sb_appendf(&sb, "padre suggerito: %s\n", b->suggested_parent);
     }

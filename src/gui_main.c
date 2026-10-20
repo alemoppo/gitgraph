@@ -55,6 +55,8 @@ typedef struct {
     const char *repo;
     const char *font;
     const char *screenshot;
+    const char *select; /* --select HASH|BRANCH */
+    const char *filter; /* --filter local|ancestors:BRANCH */
     int width;
     int height;
     int frames;
@@ -106,9 +108,13 @@ static const char *const g_font_candidates[] = {
 static void print_help(void)
 {
     printf("uso: gitgraph [--font PERCORSO] [--width N] [--height N]\n"
-           "              [--headless] [--screenshot P] [--frames N] [--help]\n"
-           "              [percorso-repo]\n"
+           "              [--headless] [--screenshot P] [--frames N]\n"
+           "              [--select HASH|BRANCH] [--filter local|ancestors:BRANCH]\n"
+           "              [--help] [percorso-repo]\n"
            "  percorso-repo  default: directory corrente\n"
+           "  --select       seleziona un commit (hash o prefisso) o un branch\n"
+           "  --filter       vista filtrata: local (senza remoti) oppure\n"
+           "                 ancestors:BRANCH (storia ancestrale del branch)\n"
            "comandi: click sinistro = seleziona, C = copia l'hash, Tab =\n"
            "         pannello, Esc = deseleziona (poi esce), R = senza remoti,\n"
            "         B = antenati del branch selezionato (di nuovo: tutti),\n"
@@ -443,6 +449,54 @@ static void app_select_branch(Model *m, App *app, size_t branch)
     app_resize(m, app);
 }
 
+/* Applica --filter e --select prima di aprire la finestra (usato anche dagli
+ * screenshot headless). La selezione e' un nome di branch, oppure un hash
+ * completo o un suo prefisso non ambiguo. */
+static bool app_prepare(Model *m, App *app, const Options *opt)
+{
+    if (opt->filter) {
+        if (strcmp(opt->filter, "local") == 0) {
+            app_apply_filter(m, app, FILTER_LOCAL, NO_IDX);
+        } else if (strncmp(opt->filter, "ancestors:", 10) == 0) {
+            const char *name = opt->filter + 10;
+            size_t bi = history_find_branch(&m->hist, name);
+            if (bi == NO_IDX || m->hist.branches[bi].tip_pos == NO_IDX) {
+                fprintf(stderr, "filtro: branch '%s' non trovato\n", name);
+                return false;
+            }
+            app_apply_filter(m, app, FILTER_ANCESTORS, bi);
+        } else {
+            fprintf(stderr, "filtro non valido: %s (local|ancestors:BRANCH)\n",
+                    opt->filter);
+            return false;
+        }
+    }
+    if (opt->select) {
+        size_t bi = history_find_branch(&m->hist, opt->select);
+        if (bi != NO_IDX && m->hist.branches[bi].tip_pos != NO_IDX) {
+            app_select_branch(m, app, bi);
+            return true;
+        }
+        size_t len = strlen(opt->select);
+        size_t found = 0, ci = NO_IDX;
+        if (len >= 4) {
+            for (size_t i = 0; i < m->data.commit_count; i++)
+                if (strncmp(m->data.commits[i].hash, opt->select, len) == 0) {
+                    if (ci == NO_IDX)
+                        ci = i;
+                    found++;
+                }
+        }
+        if (found != 1) {
+            fprintf(stderr, "selezione: '%s' non trovato o ambiguo (%zu)\n",
+                    opt->select, found);
+            return false;
+        }
+        app_select_commit(m, app, ci);
+    }
+    return true;
+}
+
 static void draw_panel(SDL_Renderer *ren, TTF_Font *font, Model *m, App *app)
 {
     float x = (float)(app->win_w - PANEL_W);
@@ -459,7 +513,7 @@ static void draw_panel(SDL_Renderer *ren, TTF_Font *font, Model *m, App *app)
     if (app->sel_active && app->sel_commit < m->data.commit_count) {
         text = render_details_text(&m->data, &m->hist, &m->lay, app->sel_commit,
                                    app->sel_is_branch ? app->sel_branch : NO_IDX,
-                                   48);
+                                   44);
     }
     if (!text)
         text = xstrdup("nessuna selezione\n\n"
@@ -794,6 +848,10 @@ int main(int argc, char **argv)
             opt.frames = atoi(argv[++i]);
         else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
             opt.screenshot = argv[++i];
+        else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc)
+            opt.select = argv[++i];
+        else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc)
+            opt.filter = argv[++i];
         else if (strcmp(argv[i], "--headless") == 0)
             opt.headless = true;
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -817,6 +875,20 @@ int main(int argc, char **argv)
     if (!model_load(&m, opt.repo, err, sizeof err)) {
         fprintf(stderr, "errore: %s\n", err);
         return 1;
+    }
+
+    App app;
+    memset(&app, 0, sizeof app);
+    app.sel_commit = NO_IDX;
+    app.sel_branch = NO_IDX;
+    app.filter_branch = NO_IDX;
+    app.repo = opt.repo;
+    app.view.zoom = 1.0;
+    app.win_w = opt.width;
+    app.win_h = opt.height;
+    if (!app_prepare(&m, &app, &opt)) {
+        model_free(&m);
+        return 2;
     }
 
     bool headless = opt.headless || opt.screenshot != NULL || opt.frames > 0;
@@ -869,15 +941,6 @@ int main(int argc, char **argv)
                 SDL_GetError());
     }
 
-    App app;
-    memset(&app, 0, sizeof app);
-    app.sel_commit = NO_IDX;
-    app.sel_branch = NO_IDX;
-    app.filter_branch = NO_IDX;
-    app.repo = opt.repo;
-    app.view.off_x = 0;
-    app.view.off_y = 0;
-    app.view.zoom = 1.0;
     SDL_GetWindowSizeInPixels(win, &app.win_w, &app.win_h);
     app_resize(&m, &app);
 

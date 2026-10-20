@@ -21,7 +21,13 @@ Il programma non scrive mai sul repository: legge la storia tramite processi
   gomito sulla riga, etichette dei riferimenti unite e impilate (con i tag),
   marcatura di HEAD, diramazioni ambigue tratteggiate, scorrimento e zoom;
   disegno verificabile senza finestra (driver `dummy`).
-- Fasi successive: interazione avanzata (dettaglio del commit, ricerca).
+- **Fase 6 (completata)**: archi di merge piu' sottili e trasparenti delle
+  catene, con un anello sul commit di destinazione; selezione di commit e rami
+  con pannello dei dettagli, barra di stato e copia dell'hash; filtri "soli
+  locali" e "antenati di un ramo" con righe e corsie compatte; strumenti
+  `gitgraph_dump --summary` e `--suggest-parents`; opzioni GUI `--select` e
+  `--filter` per gli screenshot headless.
+- Fasi successive: ricerca nel grafo.
 
 ## Struttura
 
@@ -148,12 +154,18 @@ e la diagnostica su stderr.
 
 ## Uso
 
-    build/gitgraph_dump.exe [--full] [--layout] [percorso-repo]
+    build/gitgraph_dump.exe [--full] [--layout] [--summary] \
+                            [--suggest-parents] [percorso-repo]
 
 Stampa commit (ordine topologico), riferimenti, modello dei branch con
 padre, stato e motivazione, e la disposizione del grafo (corsie, righe e
 archi). `--full` mostra i messaggi di commit completi. `--layout` stampa solo
 la tabella dei commit (riga, corsia, proprietario) e gli archi tra commit.
+`--summary` stampa **una riga** di totali: commit, branch locali e remoti, tag,
+corsie e rami per stato del padre (certi, dedotti, ambigui, configurati, senza
+padre). `--suggest-parents` stampa, per ogni branch ambiguo con un padre
+suggerito, un commento con la motivazione e la riga `ramo = padre` gia' pronta
+per la sezione `[parents]` di `graph.cfg` (non scrive nessun file).
 
 La GUI si avvia con `build/gitgraph.exe [percorso-repo]` (opzioni e comandi
 nella sezione "Rendering").
@@ -350,7 +362,7 @@ e gli archi tra commit.
   geometria del disegno (fase 5) e' in `src/render.c`, sempre senza SDL; il
   disegno vero e proprio e' in `src/gui_main.c`.
 
-## Rendering (fase 5)
+## Rendering (fasi 5 e 6)
 
 `gitgraph` disegna la scena in una finestra SDL3/SDL3_ttf. La geometria e' il
 modulo `render` (senza SDL): dai numeri del layout produce, in **unita' di
@@ -373,6 +385,10 @@ Cosa si vede:
   genitore, poi verticale in quella corsia fino al genitore. Le due proprieta'
   (nessun punto dentro un tratto orizzontale, nessun punto di un'altra catena
   dentro un tratto verticale) sono verificate dal test `render`.
+- **Archi di merge**: il genitore di merge (e i successivi) si disegna piu'
+  sottile e trasparente delle catene, e il commit di destinazione ha un piccolo
+  anello: si vede subito dove il merge e' entrato, anche quando il ramo
+  prosegue dopo il merge (la sua punta non ha l'anello).
 - **Diramazioni ambigue**: non si disegnano archi a livello di branch. Quando il
   padre e' ambiguo (padre suggerito, vedi il modello), l'arco di diramazione
   dal commit proprietario piu' vecchio al primo genitore si disegna
@@ -387,24 +403,49 @@ Cosa si vede:
   corrente (HEAD) e' evidenziato; i remoti sono attenuati.
 - **Tag**: etichette a se', con un colore diverso dai branch, ancorate alla
   corsia del commit puntato.
+- **Selezione**: il click sinistro su un commit lo seleziona (anello) ed
+  evidenzia gli archi verso i suoi genitori e figli; il click su un'etichetta
+  seleziona il ramo, evidenzia i suoi commit e l'arco di diramazione e attenua
+  il resto; il click nel vuoto deseleziona. Il trascinamento non seleziona.
+- **Pannello dei dettagli** (~380 px): si accende di default quando c'e' una
+  selezione e si attiva con Tab. Mostra hash completo, autore, data, messaggio
+  (a capo, max 12 righe), genitori abbreviati (\"merge\" se sono piu' d'uno),
+  riferimenti, ramo proprietario con padre, stato, motivazione e padre
+  suggerito. C copia l'hash negli appunti; Esc prima deseleziona, poi esce.
+  La barra di stato riporta commit visibili, corsie, filtro attivo e selezione.
+- **Filtri**: R nasconde i remoti (restano i soli commit raggiungibili da
+  branch locali, tag o HEAD; le etichette remote spariscono). Con un branch
+  selezionato, B mostra solo la storia ancestrale della sua punta (premuto di
+  nuovo torna alla vista intera). A azzera selezione e filtri. F5 ricarica il
+  repository. Il filtro e' solo una maschera di commit visibili: righe e corsie
+  si compattano senza buchi e gli archi con un estremo nascosto vengono
+  scartati, ma Layout e History non cambiano.
 
 Comandi: frecce per scorrere, PagSu/PagGiu di una schermata, Home/Fine,
-`+`/`-` per lo zoom, `0` per tornare all'inizio, ESC per uscire; rotella del
-mouse per scorrere, Ctrl+rotella per lo zoom, trascinamento col tasto sinistro
-per spostare la vista. Il disegno e' cullato sulle righe visibili, cosi' un
-repository grande resta scorrevole.
+`+`/`-` per lo zoom, `0` per tornare all'inizio, ESC per deselezionare (poi
+uscire); rotella del mouse per scorrere, Ctrl+rotella per lo zoom,
+trascinamento col tasto sinistro per spostare la vista. Click sinistro per
+selezionare, Tab per il pannello, C per copiare l'hash, R/B/A/F5 per i filtri.
+Il disegno e' cullato sulle righe visibili, cosi' un repository grande resta
+scorrevole.
 
 La finestra e' facoltativa per la verifica: con `--headless` (o con
 `--screenshot`) il programma usa il driver video `dummy` e il renderer
 software, cosi' disegna senza aprire nulla:
 
     build/gitgraph [--font PERCORSO] [--width N] [--height N] \
-                   [--headless] [--screenshot FILE.bmp] [--frames N] [percorso-repo]
+                   [--headless] [--screenshot FILE.bmp] [--frames N] \
+                   [--select HASH|BRANCH] [--filter local|ancestors:BRANCH] \
+                   [percorso-repo]
 
 `--screenshot` disegna un fotogramma, salva un BMP ed esce; `--frames N`
 disegna N fotogrammi ed esce. Il font predefinito e' un font di sistema
 (`--font` per sceglierne un altro); senza font le etichette non vengono
-disegnate ma il grafo si'.
+disegnate ma il grafo si'. `--select` seleziona all'avvio un branch (per nome)
+oppure un commit (hash completo o prefisso non ambiguo) e accende il pannello;
+`--filter` parte con la vista filtrata: `local` (senza remoti) oppure
+`ancestors:NOME` (storia ancestrale del branch). Servono soprattutto per gli
+screenshot headless, ma funzionano anche con la finestra.
 
 ## Test
 
@@ -474,7 +515,7 @@ Quindici test, nessuno con finestra:
    stesse regole (compresa la proprieta' che nessun arco passi sopra il nodo di
    un'altra catena nella stessa corsia) sono ripetute su ogni modello dalla
    proprieta' condivisa `gg_check_layout`;
-5. `render` verifica la geometria della scena (fase 5): un punto per commit
+5. `render` verifica la geometria della scena (fasi 5 e 6): un punto per commit
    alla sua corsia e riga (con indice del commit, HEAD marcato, anonimi
    marcati), un arco per ogni arco tra commit con gli estremi sulle celle, il
    primo genitore verticale di 2 punti, diramazione e merge di 3 punti con il
@@ -484,12 +525,21 @@ Quindici test, nessuno con finestra:
    (un gruppo per commit puntato, locale+remoto uniti, una etichetta per i tag,
    impilate senza sovrapporsi), il colore di corsia deterministico (palette
    ciclica di 16), il determinismo (due costruzioni identiche) e un layout vuoto
-   che produce una scena vuota. Sul repository di prova e su tre repository sintetici costruiti
-   dal test (`x`/`y`/`z` cancellati, 30 rami mergiati e cancellati in
-   sequenza, un repository pseudo-casuale con seme fisso e rami che si
-   sovrappongono) verifica che **nessun punto stia dentro un tratto
-   orizzontale** e che **nessun punto di un'altra catena stia dentro un tratto
-   verticale**;
+   che produce una scena vuota. Verifica inoltre che la **destinazione di un
+   merge** sia marcata e che la punta di un ramo che prosegue dopo il merge non
+   lo sia; la **ricerca sotto il puntatore** (il centro di un punto e di
+   un'etichetta si ritrovano, fuori no); il **testo del pannello** (hash
+   completo, autore, data, messaggio a capo con al massimo 12 righe, genitori
+   abbreviati con "(merge)", riferimenti, ramo proprietario con padre, stato,
+   motivazione, padre suggerito); i **filtri** (maschera di commit visibili,
+   righe e corsie compatte senza buchi, archi ed etichette dei commit nascosti
+   assenti, un commit raggiungibile solo da un remoto che sparisce con la sua
+   corsia, invarianza di Layout e History). Sul repository di prova e su tre
+   repository sintetici costruiti dal test (`x`/`y`/`z` cancellati, 30 rami
+   mergiati e cancellati in sequenza, un repository pseudo-casuale con seme
+   fisso e rami che si sovrappongono) verifica che **nessun punto stia dentro
+   un tratto orizzontale** e che **nessun punto di un'altra catena stia dentro
+   un tratto verticale**;
 6. `dump_smoke` esegue lo strumento di dump;
 7. `invariance` verifica che la genealogia non dipenda dall'ordine alfabetico:
    per ogni gruppo di branch con nidificazione o fratelli (nel repository di
@@ -517,7 +567,8 @@ Quindici test, nessuno con finestra:
    3 s; il test stampa il numero di corsie rispetto ai rami (senza remoti nel
    generatore sono uguali) e verifica che non ci sia una corsia anonima;
 9. `make_scale_large` + `scale_large`: ~1130 riferimenti / 50.000 commit entro
-   30 s (determinismo verificato anche sul repository grande);
+   30 s (determinismo verificato anche sul repository grande); misura il
+   **filtro locale** su 50.000 commit e verifica che resti sotto 100 ms;
 10. `make_scale_deep` + `scale_deep`: ~890 riferimenti / 20.000 commit entro
    15 s, con ogni branch nato dal precedente (catena profonda): verifica il
    controllo delle relazioni circolari e l'ordinamento dei padri;

@@ -1,9 +1,15 @@
 /* dump_main.c - strumento di ispezione testuale.
  *
- * Uso: gitgraph_dump [--full] [--layout] [--help] [percorso-repo]
- *   --full    stampa i messaggi di commit completi
- *   --layout  stampa solo la tabella dei commit (riga, corsia, proprietario)
- *             e gli archi tra commit
+ * Uso: gitgraph_dump [--full] [--layout] [--summary] [--suggest-parents]
+ *                    [--help] [percorso-repo]
+ *   --full             stampa i messaggi di commit completi
+ *   --layout           stampa solo la tabella dei commit (riga, corsia,
+ *                      proprietario) e gli archi tra commit
+ *   --summary          una riga di totali: commit, branch locali e remoti,
+ *                      tag, corsie e rami per stato del padre
+ *   --suggest-parents  per ogni branch ambiguo con un padre suggerito stampa
+ *                      un commento con la motivazione e la riga "ramo = padre"
+ *                      pronta per [parents] di graph.cfg (non scrive file)
  *
  * Senza --layout stampa commit, riferimenti, modello dei branch (padre, stato,
  * motivo) e la disposizione del grafo (corsie, righe, archi). Nessuna finestra
@@ -89,10 +95,16 @@ static void subject_line(const char *message, char *out, size_t out_size)
 
 static void print_help(void)
 {
-    printf("uso: gitgraph_dump [--full] [--layout] [--help] [percorso-repo]\n"
+    printf("uso: gitgraph_dump [--full] [--layout] [--summary]\n"
+           "                   [--suggest-parents] [--help] [percorso-repo]\n"
            "  --full     stampa i messaggi di commit completi\n"
            "  --layout   stampa la tabella dei commit (riga, corsia,\n"
            "             proprietario) e gli archi tra commit\n"
+           "  --summary  una riga di totali (commit, branch locali/remoti,\n"
+           "             tag, corsie, rami certi/dedotti/ambigui/configurati/\n"
+           "             senza padre)\n"
+           "  --suggest-parents  per ogni branch ambiguo con padre suggerito,\n"
+           "             commento con la motivazione e riga per [parents]\n"
            "  percorso-repo  default: directory corrente\n");
 }
 
@@ -128,6 +140,59 @@ static void print_commit_layout(const GitData *data, const History *hist,
     printf(", %zu archi tra commit\n", lay->cedge_count);
 }
 
+/* Una riga sola: i totali del repository e la ripartizione dei rami per stato
+ * del padre. */
+static void print_summary(const GitData *data, const History *hist,
+                          const Layout *lay)
+{
+    size_t local = 0, remote = 0, tags = 0;
+    size_t certain = 0, deduced = 0, ambiguous = 0, configured = 0, none = 0;
+    for (size_t i = 0; i < hist->branch_count; i++) {
+        if (hist->branches[i].is_remote)
+            remote++;
+        else
+            local++;
+        switch (hist->branches[i].state) {
+        case PARENT_CERTAIN:
+            certain++;
+            break;
+        case PARENT_DEDUCED:
+            deduced++;
+            break;
+        case PARENT_AMBIGUOUS:
+            ambiguous++;
+            break;
+        case PARENT_CONFIGURED:
+            configured++;
+            break;
+        default:
+            none++;
+            break;
+        }
+    }
+    for (size_t i = 0; i < data->ref_count; i++)
+        if (data->refs[i].kind == REF_TAG)
+            tags++;
+    printf("riepilogo: %zu commit, %zu branch locali, %zu remoti, %zu tag, "
+           "%zu corsie; rami: %zu certi, %zu dedotti, %zu ambigui, %zu "
+           "configurati, %zu senza padre\n",
+           data->commit_count, local, remote, tags, lay->lanes, certain, deduced,
+           ambiguous, configured, none);
+}
+
+/* Per ogni branch ambiguo con un suggerimento: commento con la motivazione e
+ * riga gia' pronta per la sezione [parents] di graph.cfg. Non scrive nulla. */
+static void print_suggested_parents(const History *hist)
+{
+    for (size_t i = 0; i < hist->branch_count; i++) {
+        const BranchNode *b = &hist->branches[i];
+        if (b->state != PARENT_AMBIGUOUS || !b->suggested_parent)
+            continue;
+        printf("# %s: %s\n", b->name, b->motivation ? b->motivation : "-");
+        printf("%s = %s\n", b->name, b->suggested_parent);
+    }
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -136,11 +201,17 @@ int main(int argc, char **argv)
     const char *repo = NULL;
     bool full = false;
     bool layout_only = false;
+    bool summary = false;
+    bool suggest = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--full") == 0)
             full = true;
         else if (strcmp(argv[i], "--layout") == 0)
             layout_only = true;
+        else if (strcmp(argv[i], "--summary") == 0)
+            summary = true;
+        else if (strcmp(argv[i], "--suggest-parents") == 0)
+            suggest = true;
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_help();
             return 0;
@@ -205,15 +276,32 @@ int main(int argc, char **argv)
             return 1;
         }
 
+        Layout lay;
+        layout_build(&lay, &hist);
+
+        if (summary) {
+            print_summary(&data, &hist, &lay);
+            layout_free(&lay);
+            history_free(&hist);
+            config_free(&cfg);
+            gitdata_free(&data);
+            return 0;
+        }
+        if (suggest) {
+            print_suggested_parents(&hist);
+            layout_free(&lay);
+            history_free(&hist);
+            config_free(&cfg);
+            gitdata_free(&data);
+            return 0;
+        }
+
         printf("repo: %s\n", data.repo_path);
         if (data.head_branch)
             printf("branch corrente: %s\n", data.head_branch);
         else
             printf("branch corrente: (HEAD scollegata)\n");
         printf("commit: %zu  riferimenti: %zu\n", data.commit_count, data.ref_count);
-
-        Layout lay;
-        layout_build(&lay, &hist);
 
         if (layout_only) {
             print_commit_layout(&data, &hist, &lay);
