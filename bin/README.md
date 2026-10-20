@@ -2,7 +2,7 @@
 
 Questa cartella contiene `gitgraph.exe` (GUI, fase 6) e le DLL necessarie:
 SDL3, SDL3_ttf e le dipendenze transitive (FreeType, HarfBuzz, GLib, ...).
-Build MSYS2 UCRT64, gcc, Release, commit `59348d7` del 2026-10-20.
+Build MSYS2 UCRT64, gcc, Release, commit `b388878` del 2026-10-20.
 
 ## Requisiti
 
